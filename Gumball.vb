@@ -15,7 +15,7 @@ Imports Rhino.Display
 Imports Rhino.Geometry
 Imports Grasshopper.Kernel.Data
 Imports GH_IO
-Imports Grasshopper.Kernel.Undo
+Imports Grasshopper.Kernel.Types
 Imports Grasshopper.GUI.Canvas
 
 ''' <summary>Receives Rhino viewport mouse downs even when a WinForms float steals focus, so we can dismiss the numeric box.</summary>
@@ -299,7 +299,7 @@ Public Class GumballComp
                 param.Optional = True
                 param.Name = "Geometry to align"
                 param.NickName = "A"
-                param.Description = "Use a geometry to align gumballs."
+                param.Description = "Plane (exact X/Y/Z axis reference) or other geometry to orient gumball axes."
                 param.Access = GH_ParamAccess.item
                 Params.RegisterInputParam(param)
                 Params.OnParametersChanged()
@@ -307,6 +307,7 @@ Public Class GumballComp
         Else
             If (Me.Params.Input.Count = 2) Then
                 MyGumball.GeometrytoAlign = Nothing
+                If MyGumball IsNot Nothing Then MyGumball.ClearAlignAxisReference()
                 Dim param As IGH_Param = Params.Input(1)
                 param.RemoveAllSources()
                 Params.UnregisterInputParameter(param)
@@ -410,6 +411,66 @@ Public Class GumballComp
 
     Private _proximityCacheOnGeometryChange As Boolean = False
 
+    Private Shared Function TryUnpackAlignPlaneFromGoo(gg As Types.IGH_GeometricGoo, ByRef pl As Plane) As Boolean
+        Dim ghp As GH_Plane = TryCast(gg, GH_Plane)
+        If ghp IsNot Nothing AndAlso ghp.IsValid Then
+            pl = ghp.Value
+            Return pl.IsValid
+        End If
+        Dim fromConvert As New Plane
+        If GH_Convert.ToPlane(gg, fromConvert, GH_Conversion.Primary) AndAlso fromConvert.IsValid Then
+            pl = fromConvert
+            Return True
+        End If
+        Return False
+    End Function
+
+    ''' <summary>Same axis directions (right-handed); plane origin is ignored for comparison.</summary>
+    Private Shared Function AlignAxisFramesEqual(a As Plane, b As Plane) As Boolean
+        Const ang As Double = 0.002
+        If Not a.IsValid OrElse Not b.IsValid Then Return False
+        If Not a.ZAxis.IsParallelTo(b.ZAxis, ang) OrElse a.ZAxis * b.ZAxis <= 0 Then Return False
+        If Not a.XAxis.IsParallelTo(b.XAxis, ang) OrElse a.XAxis * b.XAxis <= 0 Then Return False
+        Return True
+    End Function
+
+    Private Sub ApplyAlignGeometryInput(DA As IGH_DataAccess)
+        If Params.Input.Count <> 2 OrElse MyGumball Is Nothing OrElse Not ModeValue(2) Then Return
+        If Params.Input(1).VolatileDataCount = 0 Then
+            MyGumball.ClearAlignAxisReference()
+            MyGumball.GeometrytoAlign = Nothing
+            Return
+        End If
+        Dim gg As Types.IGH_GeometricGoo = Nothing
+        If Not DA.GetData(1, gg) OrElse gg Is Nothing Then Return
+
+        Dim axisPl As New Plane
+        If TryUnpackAlignPlaneFromGoo(gg, axisPl) Then
+            If Not MyGumball.HasAlignAxisReferencePlane OrElse Not AlignAxisFramesEqual(MyGumball.AlignAxisReferencePlane, axisPl) Then
+                MyGumball.SetAlignToAxisReference(axisPl)
+                If Attributes.Selected Then MyGumball.ShowGumballs()
+            End If
+            Return
+        End If
+
+        MyGumball.ClearAlignAxisReference()
+        Dim gbAlign As GeometryBase = GH_Convert.ToGeometryBase(gg)
+        If gbAlign Is Nothing Then Return
+        Dim g As GeometryBase = gbAlign.Duplicate()
+        If MyGumball.GeometrytoAlign Is Nothing Then
+            MyGumball.AlignToGeometry(g)
+        Else
+            Dim gtree As New DataTree(Of GeometryBase)
+            gtree.Add(g, New GH_Path(0))
+            Dim atree As New DataTree(Of GeometryBase)
+            atree.Add(MyGumball.GeometrytoAlign, New GH_Path(0))
+            If Not AreEquals(gtree, atree) Then
+                MyGumball.AlignToGeometry(g)
+                If Attributes.Selected Then MyGumball.ShowGumballs()
+            End If
+        End If
+    End Sub
+
     Protected Overrides Sub SolveInstance(DA As IGH_DataAccess)
         Dim Data As New GH_Structure(Of Types.IGH_GeometricGoo)
         Dim InputData As New DataTree(Of GeometryBase)
@@ -417,32 +478,7 @@ Public Class GumballComp
         'Get input data.
         If Not (DA.GetDataTree(0, Data)) Then Exit Sub
 
-        'Get geometry to align.
-        If (Me.Params.Input.Count = 2) AndAlso (MyGumball IsNot Nothing) Then
-            If (Me.Params.Input(1).VolatileDataCount > 0) Then
-                Dim gg As Types.IGH_GeometricGoo = Nothing
-                DA.GetData(1, gg)
-                If gg IsNot Nothing Then
-                    Dim gbAlign As GeometryBase = Grasshopper.Kernel.GH_Convert.ToGeometryBase(gg)
-                    If gbAlign IsNot Nothing Then
-                        Dim g As GeometryBase = gbAlign.Duplicate()
-                        If ((MyGumball.GeometrytoAlign Is Nothing)) Then
-                            MyGumball.AlignToGeometry(g)
-                        Else
-                            Dim gtree As New DataTree(Of GeometryBase)
-                            gtree.Add(g, New GH_Path(0))
-                            Dim atree As New DataTree(Of GeometryBase)
-                            atree.Add(MyGumball.GeometrytoAlign, New GH_Path(0))
-
-                            If Not (AreEquals(gtree, atree)) Then
-                                MyGumball.AlignToGeometry(g)
-                                If (Attributes.Selected) Then MyGumball.ShowGumballs()
-                            End If
-                        End If
-                    End If
-                End If
-            End If
-        End If
+        ' Align input is applied after MyGumball exists (see ApplyAlignGeometryInput).
 
         'GeometryGoo to GeometryBase (nulls preserved as Nothing per leaf).
         For Each b As GH_Path In Data.Paths
@@ -502,6 +538,7 @@ Public Class GumballComp
                 SetCache(InputData)
                 If resynced IsNot Nothing Then
                     MyGumball = resynced
+                    If Me.ModeValue(2) Then MyGumball.ReapplyStoredAlignment()
                     If (Me.Attributes.Selected) Then MyGumball.ShowGumballs()
                 End If
             End If
@@ -517,6 +554,8 @@ Public Class GumballComp
             MyGumball = New GhGumball(nonNullGeom.ToArray(), Me)
             If (Me.Attributes.Selected) Then MyGumball.ShowGumballs()
         End If
+
+        ApplyAlignGeometryInput(DA)
 
         'Set output data (null leaves pass through unchanged on both outputs).
         Dim DataOutput As New GH_Structure(Of Types.IGH_GeometricGoo)
@@ -805,6 +844,9 @@ Public Class GhGumball
     Public Count As Integer
     Public Component As GumballComp
     Public GeometrytoAlign As GeometryBase
+    ''' <summary>When align is on and input A is a Plane, gumball axes match this frame; each gumball keeps its own origin.</summary>
+    Public AlignAxisReferencePlane As Plane
+    Public HasAlignAxisReferencePlane As Boolean
     ''' <remarks>Listening only between grip mouse-down (non-numeric pick) and mouse-up so Esc cancels preview.</remarks>
     Private _rhinoEscapeSubscribed As Boolean
     ''' <remarks>PreTransform at grip pick (before mouse-move updates); restored on Escape so the gumball does not reset to identity or desync from committed geometry.</remarks>
@@ -987,6 +1029,8 @@ Public Class GhGumball
         Array.Copy(oldGb.CustomAppearance, clonedAtt, 10)
         gb.CustomAppearance = clonedAtt
         gb.GeometrytoAlign = If(oldGb.GeometrytoAlign Is Nothing, Nothing, oldGb.GeometrytoAlign.Duplicate())
+        gb.HasAlignAxisReferencePlane = oldGb.HasAlignAxisReferencePlane
+        gb.AlignAxisReferencePlane = oldGb.AlignAxisReferencePlane
 
         Dim n As Integer = Math.Min(gb.Count, newSlotToOldSlot.Length)
         For j As Integer = 0 To n - 1
@@ -1253,7 +1297,13 @@ Public Class GhGumball
         Conduits(Index).SetBaseGumball(Gumballs(Index), Appearances(Index))
         Conduits(Index).Enabled = True
 
-        If (Me.Component.ModeValue(2)) AndAlso (GeometrytoAlign IsNot Nothing) Then AlignToGeometry(GeometrytoAlign)
+        If Me.Component.ModeValue(2) Then
+            If HasAlignAxisReferencePlane AndAlso AlignAxisReferencePlane.IsValid Then
+                AlignToAxisReferencePlane()
+            ElseIf GeometrytoAlign IsNot Nothing Then
+                AlignToGeometry(GeometrytoAlign)
+            End If
+        End If
 
         Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
 
@@ -1283,7 +1333,13 @@ Public Class GhGumball
         Conduits(i).SetBaseGumball(Gumballs(i), Appearances(i))
         Conduits(i).Enabled = True
 
-        If (Me.Component.ModeValue(2)) AndAlso (GeometrytoAlign IsNot Nothing) Then AlignToGeometry(GeometrytoAlign)
+        If Me.Component.ModeValue(2) Then
+            If HasAlignAxisReferencePlane AndAlso AlignAxisReferencePlane.IsValid Then
+                AlignToAxisReferencePlane()
+            ElseIf GeometrytoAlign IsNot Nothing Then
+                AlignToGeometry(GeometrytoAlign)
+            End If
+        End If
 
 
     End Sub
@@ -1319,13 +1375,20 @@ Public Class GhGumball
         Conduits(index).SetBaseGumball(Gumballs(index), Appearances(index))
         Conduits(index).Enabled = True
 
-        If (Me.Component.ModeValue(2)) AndAlso (GeometrytoAlign IsNot Nothing) Then AlignToGeometry(GeometrytoAlign)
+        If Me.Component.ModeValue(2) Then
+            If HasAlignAxisReferencePlane AndAlso AlignAxisReferencePlane.IsValid Then
+                AlignToAxisReferencePlane()
+            ElseIf GeometrytoAlign IsNot Nothing Then
+                AlignToGeometry(GeometrytoAlign)
+            End If
+        End If
 
         Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
     End Sub
 
     Public Sub AlignToGeometry(Geo As GeometryBase)
 
+        HasAlignAxisReferencePlane = False
         GeometrytoAlign = Geo
 
         For i As Int32 = 0 To Count - 1
@@ -1381,6 +1444,45 @@ Public Class GhGumball
 
         Next
         Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
+    End Sub
+
+    Public Sub ClearAlignAxisReference()
+        HasAlignAxisReferencePlane = False
+        AlignAxisReferencePlane = Plane.Unset
+    End Sub
+
+    Public Sub SetAlignToAxisReference(refPl As Plane)
+        If Not refPl.IsValid Then Return
+        HasAlignAxisReferencePlane = True
+        AlignAxisReferencePlane = refPl
+        GeometrytoAlign = Nothing
+        AlignToAxisReferencePlane()
+    End Sub
+
+    ''' <summary>Align all gumball axes to <see cref="AlignAxisReferencePlane"/>; each gumball keeps its current origin (centre).</summary>
+    Public Sub AlignToAxisReferencePlane()
+        If Not HasAlignAxisReferencePlane OrElse Not AlignAxisReferencePlane.IsValid Then Return
+        For i As Int32 = 0 To Count - 1
+            Dim gbframe As Rhino.UI.Gumball.GumballFrame = Conduits(i).Gumball.Frame
+            Dim baseFrame As Rhino.UI.Gumball.GumballFrame = Gumballs(i).Frame
+            Dim o As Point3d = gbframe.Plane.Origin
+            gbframe.Plane = New Plane(o, AlignAxisReferencePlane.XAxis, AlignAxisReferencePlane.YAxis)
+            baseFrame.Plane = gbframe.Plane
+            baseFrame.ScaleGripDistance = gbframe.ScaleGripDistance
+            Gumballs(i).Frame = baseFrame
+            Conduits(i).SetBaseGumball(Gumballs(i), Appearances(i))
+            Conduits(i).Enabled = True
+        Next
+        Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
+    End Sub
+
+    Friend Sub ReapplyStoredAlignment()
+        If Component Is Nothing OrElse Not Component.ModeValue(2) Then Return
+        If HasAlignAxisReferencePlane AndAlso AlignAxisReferencePlane.IsValid Then
+            AlignToAxisReferencePlane()
+        ElseIf GeometrytoAlign IsNot Nothing Then
+            AlignToGeometry(GeometrytoAlign)
+        End If
     End Sub
 
     ''' <summary>Commits the current conduit delta to Grasshopper geometry and gumball bases (picked slot <paramref name="gripIndex"/>).</summary>
