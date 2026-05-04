@@ -15,11 +15,11 @@
     <LangVersion>latest</LangVersion>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <NoWarn>42016,41999,42017,42018,42019,42032,42036,42020,42021,42022,NU1701,NETSDK1086</NoWarn>
-    <Version>1.0.1</Version>
+    <Version>1.0.2</Version>
     <Title>GumballGH</Title>
     <Authors>GIA</Authors>
     <Company>GIA</Company>
-    <Description>Grasshopper gumball for geometry (Rhino 8 / .NET 7, Windows and macOS)</Description>
+    <Description>Viewport gumball for Grasshopper geometry: interactive transforms, compound transforms, preserve modes (Rhino 8 / .NET 8).</Description>
     <!-- Matches user's Grasshopper User Libraries ▸ GIA on this machine (Rhino 8); Windows uses Roaming Grasshopper Libraries ▸ GIA. -->
     <GiaGrasshopperLibraries Condition="'$(OS)' == 'Windows_NT'">$(USERPROFILE)\AppData\Roaming\Grasshopper\Libraries\GIA</GiaGrasshopperLibraries>
     <GiaGrasshopperLibraries Condition="'$(OS)' != 'Windows_NT'">$(HOME)/Library/Application Support/McNeel/Rhinoceros/8.0/Plug-ins/Grasshopper (b45a29b1-4343-4035-989e-044e8580d9cf)/Libraries/GIA</GiaGrasshopperLibraries>

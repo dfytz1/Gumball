@@ -740,6 +740,9 @@ Public Class GhGumball
     Public GeometrytoAlign As GeometryBase
     ''' <remarks>Listening only between grip mouse-down (non-numeric pick) and mouse-up so Esc cancels preview.</remarks>
     Private _rhinoEscapeSubscribed As Boolean
+    ''' <remarks>PreTransform at grip pick (before mouse-move updates); restored on Escape so the gumball does not reset to identity or desync from committed geometry.</remarks>
+    Private _dragPreTransformSnapshot As Transform
+    Private _dragPreTransformCaptured As Boolean
 
 #Region "New/Show/Hide/Dispose"
     Sub New(Geo As GeometryBase(), comp As GumballComp)
@@ -1347,6 +1350,8 @@ Public Class GhGumball
                     Dim screenPt As Drawing.Point = Control.MousePosition
                     TextBox = New FormTextBox(screenPt, Me)
                 Else
+                    _dragPreTransformSnapshot = Conduits(i).PreTransform
+                    _dragPreTransformCaptured = True
                     EnsureRhinoEscapeHandler()
                 End If
                 Exit For
@@ -1370,7 +1375,6 @@ Public Class GhGumball
     Private Sub OnRhinoEscapePressed(sender As Object, e As EventArgs)
         If TextBox IsNot Nothing Then Return
         If Index < 0 OrElse Index >= Count Then Return
-        If Conduits(Index).PickResult.Mode = Rhino.UI.Gumball.GumballMode.None Then Return
         CancelActiveGripDragViaEscape()
     End Sub
 
@@ -1380,13 +1384,19 @@ Public Class GhGumball
         If ix >= 0 AndAlso ix < Count Then
             Try
                 Dim c As Rhino.UI.Gumball.GumballDisplayConduit = Conduits(ix)
-                c.PreTransform = Transform.Identity
+                If _dragPreTransformCaptured Then
+                    c.PreTransform = _dragPreTransformSnapshot
+                End If
+                c.PickResult.SetToDefault()
                 c.SetBaseGumball(Gumballs(ix), Appearances(ix))
+                c.Enabled = True
                 SaveUndo = False
             Catch
             End Try
         End If
+        _dragPreTransformCaptured = False
         Index = -1
+        Me.Enabled = True
         Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
         TearDownRhinoEscapeHandler()
     End Sub
@@ -1446,6 +1456,8 @@ Public Class GhGumball
         End If
 
         If (Index = -1) Or (Index >= Count) Or (ValueString <> String.Empty) Then Exit Sub
+
+        _dragPreTransformCaptured = False
 
         If (SaveUndo) Then
             Component.RecordUndoEvent("Gumball Drag", New GbUndo(Me))
