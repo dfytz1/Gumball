@@ -1,4 +1,4 @@
-Imports System.Collections.Generic
+﻿Imports System.Collections.Generic
 Imports System.Collections
 Imports System.IO
 Imports System.Linq
@@ -722,12 +722,10 @@ Public Class GumballComp
                     End If
 
                     If d Is Nothing Then
-                        ' Emit a duplicate — internal Geometry(slots) are mutated by gumball commits; emitting the same
-                        ' Rhino.Geometry reference can leave Grasshopper output VolatileData "unchanged" so wires do not propagate.
-                        d = GH_Convert.ToGeometricGoo(MyGumball.Geometry(slot).Duplicate())
+                        d = GH_Convert.ToGeometricGoo(MyGumball.Geometry(slot))
                     End If
                     If xfOut Is Nothing Then
-                        xfOut = CloneGhTransform(MyGumball.Xform(slot))
+                        xfOut = MyGumball.Xform(slot)
                     End If
                     DataOutput.Append(d, Paths(leaf))
                     DataOutput2.Append(xfOut, Paths(leaf))
@@ -747,16 +745,6 @@ Public Class GumballComp
         Next
         Dim append As New Grasshopper.Kernel.Types.GH_Transform(New Grasshopper.Kernel.Types.Transforms.Generic(generic))
         For Each t As Grasshopper.Kernel.Types.Transforms.ITransform In append.CompoundTransforms
-            result.CompoundTransforms.Add(t.Duplicate())
-        Next
-        result.ClearCaches()
-        Return result
-    End Function
-
-    Private Shared Function CloneGhTransform(ByVal xf As Grasshopper.Kernel.Types.GH_Transform) As Grasshopper.Kernel.Types.GH_Transform
-        If xf Is Nothing Then Return Nothing
-        Dim result As New Grasshopper.Kernel.Types.GH_Transform()
-        For Each t As Grasshopper.Kernel.Types.Transforms.ITransform In xf.CompoundTransforms
             result.CompoundTransforms.Add(t.Duplicate())
         Next
         result.ClearCaches()
@@ -896,6 +884,20 @@ Public Class GumballComp
                                 Exit Function
                             End If
                         Next
+
+                    Case Else
+                        Dim boxA As BoundingBox = aCell.GetBoundingBox(True)
+                        Dim boxB As BoundingBox = bCell.GetBoundingBox(True)
+                        If Not boxA.IsValid OrElse Not boxB.IsValid Then
+                            Return False
+                            Exit Function
+                        End If
+                        Const bboxCompareTol As Double = 0.001
+                        If boxA.Min.DistanceTo(boxB.Min) > bboxCompareTol OrElse boxA.Max.DistanceTo(boxB.Max) > bboxCompareTol Then
+                            Return False
+                            Exit Function
+                        End If
+
                 End Select
             Next
         Next
@@ -1475,10 +1477,10 @@ Public Class GhGumball
         pln.Transform(xform)
 
         If (Rhino.ApplicationSettings.ModelAidSettings.GridSnap) Then
-            If (Conduits(i).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateFree Or Conduits(i).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateX Or
-                    Conduits(i).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateY Or Conduits(i).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateZ Or
-                    Conduits(i).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateXY Or Conduits(i).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateYZ Or
-                    Conduits(i).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateZX) Then
+            If (Conduits(Index).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateFree Or Conduits(Index).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateX Or
+                    Conduits(Index).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateY Or Conduits(Index).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateZ Or
+                    Conduits(Index).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateXY Or Conduits(Index).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateYZ Or
+                    Conduits(Index).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateZX) Then
 
                 pln.Origin = New Point3d(CInt(pln.Origin.X), CInt(pln.Origin.Y), CInt(pln.Origin.Z))
                 gbframe.Plane = pln
