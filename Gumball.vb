@@ -1490,6 +1490,41 @@ Public Class GhGumball
         Return c.UpdateGumball(dragPoint, wordline)
     End Function
 
+    ''' <summary>Priming translate grips via UpdateGumball at a CPlane pick introduces a bogus translation versus axis-only numeric moves; numeric entry must leave the conduit on the stored base gumball.</summary>
+    Private Shared Function IsTranslateGumballMode(mode As Rhino.UI.Gumball.GumballMode) As Boolean
+        Select Case mode
+            Case Rhino.UI.Gumball.GumballMode.TranslateX,
+                    Rhino.UI.Gumball.GumballMode.TranslateY,
+                    Rhino.UI.Gumball.GumballMode.TranslateZ,
+                    Rhino.UI.Gumball.GumballMode.TranslateFree,
+                    Rhino.UI.Gumball.GumballMode.TranslateXY,
+                    Rhino.UI.Gumball.GumballMode.TranslateYZ,
+                    Rhino.UI.Gumball.GumballMode.TranslateZX
+                Return True
+            Case Else
+                Return False
+        End Select
+    End Function
+
+    ''' <summary>Suppress Grasshopper live preview when conduit delta is only float/model-tolerance noise before a deliberate drag.</summary>
+    Private Shared Function IsNegligibleGumballPreviewDelta(xf As Transform) As Boolean
+        If Not xf.IsValid Then Return True
+        Dim tolT As Double = 1.0E-6
+        Try
+            tolT = Math.Max(Rhino.RhinoDoc.ActiveDoc.ModelAbsoluteTolerance * 100.0, 1.0E-9)
+        Catch
+            tolT = 1.0E-6
+        End Try
+        Dim trSq As Double = xf.M03 * xf.M03 + xf.M13 * xf.M13 + xf.M23 * xf.M23
+        If trSq >= tolT * tolT Then Return False
+        If Math.Abs(xf.M33 - 1.0R) > 1.0E-8 Then Return False
+        Const er As Double = 1.0E-5
+        If Math.Abs(xf.M00 - 1.0R) > er OrElse Math.Abs(xf.M11 - 1.0R) > er OrElse Math.Abs(xf.M22 - 1.0R) > er Then Return False
+        If Math.Abs(xf.M01) > er OrElse Math.Abs(xf.M02) > er OrElse Math.Abs(xf.M10) > er OrElse Math.Abs(xf.M12) > er OrElse Math.Abs(xf.M20) > er OrElse Math.Abs(xf.M21) > er Then Return False
+        If Math.Abs(xf.M30) > er OrElse Math.Abs(xf.M31) > er OrElse Math.Abs(xf.M32) > er Then Return False
+        Return True
+    End Function
+
     Protected Overrides Sub OnMouseDown(e As Rhino.UI.MouseCallbackEventArgs)
         MyBase.OnMouseDown(e)
         CloseNumericTextBoxIfAny()
@@ -1614,12 +1649,22 @@ Public Class GhGumball
         Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
 
         If Component IsNot Nothing AndAlso Component.LiveTransformsWhileDragging Then
-            PreviewGripSlot = Index
-            PreviewGripDelta = Conduits(Index).GumballTransform
-            Try
-                Component.ExpireSolution(True)
-            Catch
-            End Try
+            Dim gt As Transform = Conduits(Index).GumballTransform
+            If IsNegligibleGumballPreviewDelta(gt) Then
+                PreviewGripSlot = -1
+                PreviewGripDelta = Transform.Identity
+                Try
+                    Component.ExpireSolution(True)
+                Catch
+                End Try
+            Else
+                PreviewGripSlot = Index
+                PreviewGripDelta = gt
+                Try
+                    Component.ExpireSolution(True)
+                Catch
+                End Try
+            End If
         End If
 
         e.Cancel = True
@@ -1638,13 +1683,25 @@ Public Class GhGumball
 
         If (Index = -1) Or (Index >= Count) Or (ValueString <> String.Empty) Then Exit Sub
 
-        ' Click without drag: prime conduit once at pick so rotate/translate grips show Rhino active-handle graphics; then open numeric float.
+        ' Click without drag: prime rotate/scale visuals only — translate priming snaps the conduit to an off-axis CPlane point and corrupts numeric move origins.
         If Not _gripExceededDragThreshold Then
             _dragPreTransformCaptured = False
             SaveUndo = False
+            PreviewGripSlot = -1
+            PreviewGripDelta = Transform.Identity
             Try
-                If e.View IsNot Nothing AndAlso TryViewportUpdateGumball(Index, e.View, _gripDownViewport) Then
-                    Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
+                If e.View IsNot Nothing Then
+                    Dim ixPrimed As Integer = Index
+                    If ixPrimed >= 0 AndAlso ixPrimed < Count AndAlso Not IsTranslateGumballMode(Conduits(ixPrimed).PickResult.Mode) Then
+                        If TryViewportUpdateGumball(ixPrimed, e.View, _gripDownViewport) Then
+                            Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
+                        End If
+                    Else
+                        Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
+                    End If
+                    If Component IsNot Nothing AndAlso Component.LiveTransformsWhileDragging Then
+                        Component.ExpireSolution(True)
+                    End If
                 End If
             Catch
             End Try
