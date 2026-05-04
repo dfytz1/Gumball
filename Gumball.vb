@@ -172,6 +172,9 @@ Public Class GumballComp
         Dim proximityItem As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Proximity cache", AddressOf Me.Menu_ProximityCache, True, Me.ProximityCache)
         proximityItem.ToolTipText = "Like preserve on changes, but match each item to the prior gumball by nearest cached bounding‑box centre (same object type), so list shifts keep the right transform."
 
+        Dim liveItem As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Live", AddressOf Me.Menu_LiveTransformsWhileDragging, True, Me.LiveTransformsWhileDragging)
+        liveItem.ToolTipText = "Refresh downstream Grasshopper while dragging the gumball; one undo compound entry per finished drag."
+
         Menu_AppendSeparator(menu)
 
         Dim arrows As Windows.Forms.ToolStripItem = Menu_AppendItem(menu, "Only arrows", AddressOf Me.Menu_OnlyArrows, True, Me.ModeValue(1) = 1)
@@ -280,6 +283,11 @@ Public Class GumballComp
         If (MyGumball IsNot Nothing) Then Me.RecordUndoEvent("Preserve on changes", New GbUndo(Me.MyGumball))
         Me.PreserveTransformsOnGeometryChange = Not Me.PreserveTransformsOnGeometryChange
     End Sub
+
+    Private Sub Menu_LiveTransformsWhileDragging()
+        If (MyGumball IsNot Nothing) Then Me.RecordUndoEvent("Live (while dragging)", New GbUndo(Me.MyGumball))
+        Me.LiveTransformsWhileDragging = Not Me.LiveTransformsWhileDragging
+    End Sub
 #End Region
 
     Private Sub EventAddParamAlign()
@@ -373,6 +381,18 @@ Public Class GumballComp
     End Property
 
     Private _preserveTransformsOnGeometryChange As Boolean = False
+
+    ''' <summary>When true, Gumball viewport drags refresh downstream Grasshopper outputs during the drag (preview only); geometry and transforms are committed once on mouse-up, like built-in Grasshopper point/parameters.</summary>
+    Public Property LiveTransformsWhileDragging As Boolean
+        Get
+            Return _liveTransformsWhileDragging
+        End Get
+        Set(value As Boolean)
+            _liveTransformsWhileDragging = value
+        End Set
+    End Property
+
+    Private _liveTransformsWhileDragging As Boolean
 
     ''' <summary>
     ''' When upstream changes, remap transforms onto new items by greedy nearest centroid (from cached upstream geometry).
@@ -507,9 +527,42 @@ Public Class GumballComp
                     DataOutput.Append(Nothing, Paths(leaf))
                     DataOutput2.Append(Nothing, Paths(leaf))
                 Else
-                    Dim d As Types.IGH_GeometricGoo = GH_Convert.ToGeometricGoo(MyGumball.Geometry(slot))
+                    Dim d As Types.IGH_GeometricGoo = Nothing
+                    Dim xfOut As Grasshopper.Kernel.Types.GH_Transform = Nothing
+                    If LiveTransformsWhileDragging AndAlso MyGumball.PreviewGripSlot >= 0 AndAlso Not (MyGumball.PreviewGripDelta = Transform.Identity) Then
+
+                        Dim pSlot As Integer = MyGumball.PreviewGripSlot
+                        Dim liveD As Transform = MyGumball.PreviewGripDelta
+
+                        Select Case ModeValue(0)
+
+                            Case 1 ' Apply to all — preview transforms every slot equally.
+                                Dim gx As GeometryBase = MyGumball.Geometry(slot).Duplicate()
+                                gx.Transform(liveD)
+                                d = GH_Convert.ToGeometricGoo(gx)
+                                xfOut = ComposeGhTransformAppendGeneric(MyGumball.Xform(slot), liveD)
+
+                            Case 0 ' Normal — preview only on the dragged slot.
+                                If slot = pSlot Then
+                                    Dim gx0 As GeometryBase = MyGumball.Geometry(slot).Duplicate()
+                                    gx0.Transform(liveD)
+                                    d = GH_Convert.ToGeometricGoo(gx0)
+                                    xfOut = ComposeGhTransformAppendGeneric(MyGumball.Xform(slot), liveD)
+                                End If
+
+                            Case Else ' Relocate: geometry/transform outputs unchanged; Expire refreshes dependents.
+
+                        End Select
+                    End If
+
+                    If d Is Nothing Then
+                        d = GH_Convert.ToGeometricGoo(MyGumball.Geometry(slot))
+                    End If
+                    If xfOut Is Nothing Then
+                        xfOut = MyGumball.Xform(slot)
+                    End If
                     DataOutput.Append(d, Paths(leaf))
-                    DataOutput2.Append(MyGumball.Xform(slot), Paths(leaf))
+                    DataOutput2.Append(xfOut, Paths(leaf))
                 End If
             Next
         End If
@@ -518,6 +571,19 @@ Public Class GumballComp
         DA.SetDataTree(1, DataOutput2)
 
     End Sub
+
+    Private Shared Function ComposeGhTransformAppendGeneric(baseXf As Grasshopper.Kernel.Types.GH_Transform, generic As Transform) As Grasshopper.Kernel.Types.GH_Transform
+        Dim result As New Grasshopper.Kernel.Types.GH_Transform()
+        For Each t As Grasshopper.Kernel.Types.Transforms.ITransform In baseXf.CompoundTransforms
+            result.CompoundTransforms.Add(t.Duplicate())
+        Next
+        Dim append As New Grasshopper.Kernel.Types.GH_Transform(New Grasshopper.Kernel.Types.Transforms.Generic(generic))
+        For Each t As Grasshopper.Kernel.Types.Transforms.ITransform In append.CompoundTransforms
+            result.CompoundTransforms.Add(t.Duplicate())
+        Next
+        result.ClearCaches()
+        Return result
+    End Function
 
     Private Sub SetCache(_InputData As DataTree(Of GeometryBase))
 
@@ -743,6 +809,9 @@ Public Class GhGumball
     ''' <remarks>PreTransform at grip pick (before mouse-move updates); restored on Escape so the gumball does not reset to identity or desync from committed geometry.</remarks>
     Private _dragPreTransformSnapshot As Transform
     Private _dragPreTransformCaptured As Boolean
+    ''' <summary>While <see cref="GumballComp.LiveTransformsWhileDragging"/> and a grip drag is active: pending conduit delta not yet committed to stored geometry / compound transforms.</summary>
+    Friend PreviewGripSlot As Integer = -1
+    Friend PreviewGripDelta As Transform = Transform.Identity
 
 #Region "New/Show/Hide/Dispose"
     Sub New(Geo As GeometryBase(), comp As GumballComp)
@@ -1036,6 +1105,12 @@ Public Class GhGumball
             comp.ModeValue(2) = att1.GetBoolean("aligntogeometry", 2)
             comp.PreserveTransformsOnGeometryChange = att1.GetBoolean("preservexf", 3)
             comp.ProximityCache = att1.GetBoolean("proximitycache", 4)
+            Dim lvStored As Boolean
+            If att1.TryGetBoolean("livetransform", 5, lvStored) Then
+                comp.LiveTransformsWhileDragging = lvStored
+            Else
+                comp.LiveTransformsWhileDragging = False
+            End If
 
             'End reader.
 
@@ -1134,6 +1209,8 @@ Public Class GhGumball
     Public Sub Dispose()
         CloseNumericTextBoxIfAny()
         TearDownRhinoEscapeHandler()
+        PreviewGripSlot = -1
+        PreviewGripDelta = Transform.Identity
         For i As Int32 = 0 To Count - 1
             Conduits(i).Enabled = False
             Conduits(i).Dispose()
@@ -1299,6 +1376,43 @@ Public Class GhGumball
         Next
         Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
     End Sub
+
+    ''' <summary>Commits the current conduit delta to Grasshopper geometry and gumball bases (picked slot <paramref name="gripIndex"/>).</summary>
+    Private Sub CommitGripTransform(ByVal gripIndex As Integer, gbxform As Transform)
+        If gripIndex < 0 OrElse gripIndex >= Count OrElse gbxform = Transform.Identity Then Return
+
+        Select Case Component.ModeValue(0)
+
+            Case 0 'Normal.
+                Dim ghXform As New Grasshopper.Kernel.Types.GH_Transform(New Grasshopper.Kernel.Types.Transforms.Generic(gbxform))
+                For Each t As Grasshopper.Kernel.Types.Transforms.ITransform In ghXform.CompoundTransforms
+                    Xform(gripIndex).CompoundTransforms.Add(t.Duplicate())
+                Next
+                Xform(gripIndex).ClearCaches()
+                Geometry(gripIndex).Transform(gbxform)
+                UpdateGumball(gripIndex)
+
+            Case 1 'Apply to all.
+                Dim ghXform As New Grasshopper.Kernel.Types.GH_Transform(New Grasshopper.Kernel.Types.Transforms.Generic(gbxform))
+                For i As Int32 = 0 To Count - 1
+                    For Each t As Grasshopper.Kernel.Types.Transforms.ITransform In ghXform.CompoundTransforms
+                        Xform(i).CompoundTransforms.Add(t.Duplicate())
+                    Next
+                    Xform(i).ClearCaches()
+                    Geometry(i).Transform(gbxform)
+                    If i = gripIndex Then
+                        UpdateGumball(i)
+                    Else
+                        UpdateGumball(i, gbxform)
+                    End If
+                Next
+                Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
+
+            Case 2 'Relocate.
+                UpdateGumball(gripIndex)
+
+        End Select
+    End Sub
 #End Region
 
 #Region "MouseCallback"
@@ -1350,6 +1464,8 @@ Public Class GhGumball
                     Dim screenPt As Drawing.Point = Control.MousePosition
                     TextBox = New FormTextBox(screenPt, Me)
                 Else
+                    PreviewGripDelta = Transform.Identity
+                    PreviewGripSlot = -1
                     _dragPreTransformSnapshot = Conduits(i).PreTransform
                     _dragPreTransformCaptured = True
                     EnsureRhinoEscapeHandler()
@@ -1380,7 +1496,12 @@ Public Class GhGumball
 
     ''' <summary>Abort in-viewport drag (move/rotate/scale) without committing GumballTransform to geometry.</summary>
     Private Sub CancelActiveGripDragViaEscape()
+
         Dim ix As Integer = Index
+
+        PreviewGripSlot = -1
+        PreviewGripDelta = Transform.Identity
+
         If ix >= 0 AndAlso ix < Count Then
             Try
                 Dim c As Rhino.UI.Gumball.GumballDisplayConduit = Conduits(ix)
@@ -1397,6 +1518,14 @@ Public Class GhGumball
         _dragPreTransformCaptured = False
         Index = -1
         Me.Enabled = True
+
+        If Component IsNot Nothing Then
+            Try
+                Component.ExpireSolution(True)
+            Catch
+            End Try
+        End If
+
         Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
         TearDownRhinoEscapeHandler()
     End Sub
@@ -1441,6 +1570,16 @@ Public Class GhGumball
         End If
         If Not (Conduits(Index).UpdateGumball(dragPoint, wordline)) Then Exit Sub
         Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
+
+        If Component IsNot Nothing AndAlso Component.LiveTransformsWhileDragging Then
+            PreviewGripSlot = Index
+            PreviewGripDelta = Conduits(Index).GumballTransform
+            Try
+                Component.ExpireSolution(True)
+            Catch
+            End Try
+        End If
+
         e.Cancel = True
     End Sub
 
@@ -1459,49 +1598,25 @@ Public Class GhGumball
 
         _dragPreTransformCaptured = False
 
-        If (SaveUndo) Then
+        Dim gripIdx As Integer = Index
+        Dim finalXform As Transform = Conduits(gripIdx).GumballTransform
+
+        PreviewGripSlot = -1
+        PreviewGripDelta = Transform.Identity
+
+        If SaveUndo AndAlso (finalXform <> Transform.Identity) Then
             Component.RecordUndoEvent("Gumball Drag", New GbUndo(Me))
-            SaveUndo = False
+        End If
+        SaveUndo = False
+
+        If finalXform <> Transform.Identity Then
+            CommitGripTransform(gripIdx, finalXform)
         End If
 
-        Dim gbxform As Transform = Conduits(Index).GumballTransform
-
-        If (gbxform <> Transform.Identity) Then
-
-            Select Case Component.ModeValue(0)
-
-                Case 0 'Normal
-                    Dim ghXform As New Grasshopper.Kernel.Types.GH_Transform(New Grasshopper.Kernel.Types.Transforms.Generic(gbxform))
-                    For Each t As Grasshopper.Kernel.Types.Transforms.ITransform In ghXform.CompoundTransforms
-                        Xform(Index).CompoundTransforms.Add(t.Duplicate())
-                    Next
-                    Xform(Index).ClearCaches()
-                    Geometry(Index).Transform(gbxform)
-                    UpdateGumball(Index)
-
-                Case 1 'Apply to all.
-                    Dim ghXform As New Grasshopper.Kernel.Types.GH_Transform(New Grasshopper.Kernel.Types.Transforms.Generic(gbxform))
-                    For i As Int32 = 0 To Count - 1
-                        For Each t As Grasshopper.Kernel.Types.Transforms.ITransform In ghXform.CompoundTransforms
-                            Xform(i).CompoundTransforms.Add(t.Duplicate())
-                        Next
-                        Xform(i).ClearCaches()
-                        Geometry(i).Transform(gbxform)
-                        If (i = Index) Then
-                            UpdateGumball(i)
-                        Else
-                            UpdateGumball(i, gbxform)
-                        End If
-                    Next
-                    Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
-
-                Case 2 'Relocate.
-                    UpdateGumball(Index)
-
-            End Select
-
+        If Component.LiveTransformsWhileDragging OrElse (finalXform <> Transform.Identity) Then
             Component.ExpireSolution(True)
         End If
+
         Index = -1
         e.Cancel = True
     End Sub
@@ -1899,6 +2014,7 @@ Public Class GhGumball
             att1.SetBoolean("aligntogeometry", 2, Me.Component.ModeValue(2))
             att1.SetBoolean("preservexf", 3, Me.Component.PreserveTransformsOnGeometryChange)
             att1.SetBoolean("proximitycache", 4, Me.Component.ProximityCache)
+            att1.SetBoolean("livetransform", 5, Me.Component.LiveTransformsWhileDragging)
 
         Catch ex As Exception
             Rhino.RhinoApp.WriteLine("WRITER_GB; " & ex.ToString())
@@ -1982,6 +2098,12 @@ Public Class GhGumball
             Component.ModeValue(2) = att1.GetBoolean("aligntogeometry", 2)
             Component.PreserveTransformsOnGeometryChange = att1.GetBoolean("preservexf", 3)
             Component.ProximityCache = att1.GetBoolean("proximitycache", 4)
+            Dim lvStored2 As Boolean
+            If att1.TryGetBoolean("livetransform", 5, lvStored2) Then
+                Component.LiveTransformsWhileDragging = lvStored2
+            Else
+                Component.LiveTransformsWhileDragging = False
+            End If
 
             'End reader.
 
