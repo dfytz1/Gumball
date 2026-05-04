@@ -1,6 +1,11 @@
 ﻿Imports System.Collections.Generic
+Imports System.Collections
 Imports System.IO
 Imports System.Linq
+Imports System.Drawing
+Imports System.Drawing.Drawing2D
+Imports System.Drawing.Imaging
+Imports System.Reflection
 Imports System.Windows.Forms
 Imports Grasshopper
 Imports Grasshopper.Kernel
@@ -10,6 +15,27 @@ Imports Rhino.Geometry
 Imports Grasshopper.Kernel.Data
 Imports GH_IO
 Imports Grasshopper.Kernel.Undo
+Imports Grasshopper.GUI.Canvas
+
+''' <summary>Receives Rhino viewport mouse downs even when a WinForms float steals focus, so we can dismiss the numeric box.</summary>
+Friend NotInheritable Class GumballNumericBackdropMouse
+    Inherits Rhino.UI.MouseCallback
+
+    Friend Shared ReadOnly Instance As New GumballNumericBackdropMouse()
+
+    Private Sub New()
+    End Sub
+
+    Friend Sub EnsureEnabled()
+        If Not Me.Enabled Then Me.Enabled = True
+    End Sub
+
+    Protected Overrides Sub OnMouseDown(e As Rhino.UI.MouseCallbackEventArgs)
+        MyBase.OnMouseDown(e)
+        FormTextBox.RequestDismissFromBackdropMouse()
+        FormAttributes.RequestDismissFromBackdropMouse()
+    End Sub
+End Class
 
 Public Class GumballComp
     Inherits GH_Component
@@ -19,9 +45,56 @@ Public Class GumballComp
     End Sub
 
 #Region "Overrides"
+    Private Shared ReadOnly GumballIconResourceName As String = "GumballGH.GumballIcon.png"
+
+    Private Shared _gumballIcon As System.Drawing.Bitmap
+
+    Private Shared Function BuildFallbackGumballIcon24x24() As System.Drawing.Bitmap
+        Const w As Integer = 24, h As Integer = 24
+        Dim bmp As New System.Drawing.Bitmap(w, h, PixelFormat.Format32bppArgb)
+        Dim bg As System.Drawing.Color = System.Drawing.Color.FromArgb(255, 230, 110, 55)
+        Dim axis As System.Drawing.Color = System.Drawing.Color.FromArgb(255, 40, 40, 40)
+        Dim cx As Integer = w \ 2, cy As Integer = h \ 2
+        For yy As Integer = 0 To h - 1
+            For xx As Integer = 0 To w - 1
+                Dim c As System.Drawing.Color = bg
+                If (Math.Abs(xx - cx) <= 9 AndAlso Math.Abs(yy - cy) <= 1) OrElse
+                        (Math.Abs(yy - cy) <= 9 AndAlso Math.Abs(xx - cx) <= 1) Then
+                    c = axis
+                End If
+                bmp.SetPixel(xx, yy, c)
+            Next
+        Next
+        Return bmp
+    End Function
+
+    ''' <summary>Embedded PNG (see project EmbeddedResource); scaled to 24×24 for Grasshopper.</summary>
+    Private Shared Function LoadEmbeddedGumballIcon() As System.Drawing.Bitmap
+        Const target As Integer = 24
+        Try
+            Dim asm As Assembly = Assembly.GetExecutingAssembly()
+            Using src As Stream = asm.GetManifestResourceStream(GumballIconResourceName)
+                If src Is Nothing Then Return BuildFallbackGumballIcon24x24()
+                Using srcImg As Image = Image.FromStream(src)
+                    Dim bmp As New Bitmap(target, target, PixelFormat.Format32bppArgb)
+                    Using g As Graphics = Graphics.FromImage(bmp)
+                        g.Clear(Color.Transparent)
+                        g.InterpolationMode = InterpolationMode.HighQualityBicubic
+                        g.PixelOffsetMode = PixelOffsetMode.HighQuality
+                        g.DrawImage(srcImg, New Rectangle(0, 0, target, target))
+                    End Using
+                    Return bmp
+                End Using
+            End Using
+        Catch
+            Return BuildFallbackGumballIcon24x24()
+        End Try
+    End Function
+
     Protected Overrides ReadOnly Property Icon() As System.Drawing.Bitmap
         Get
-            Return My.Resources.GumballIcon
+            If (_gumballIcon Is Nothing) Then _gumballIcon = LoadEmbeddedGumballIcon()
+            Return _gumballIcon
         End Get
     End Property
 
@@ -93,6 +166,14 @@ Public Class GumballComp
 
         Menu_AppendSeparator(menu)
 
+        Dim preserveOnChange As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Preserve on changes", AddressOf Me.Menu_PreserveOnChanges, True, Me.PreserveTransformsOnGeometryChange)
+        preserveOnChange.ToolTipText = "Keep gumball transforms when upstream geometry or the data tree changes (per item index when types match)."
+
+        Dim proximityItem As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Proximity cache", AddressOf Me.Menu_ProximityCache, True, Me.ProximityCache)
+        proximityItem.ToolTipText = "Like preserve on changes, but match each item to the prior gumball by nearest cached bounding‑box centre (same object type), so list shifts keep the right transform."
+
+        Menu_AppendSeparator(menu)
+
         Dim arrows As Windows.Forms.ToolStripItem = Menu_AppendItem(menu, "Only arrows", AddressOf Me.Menu_OnlyArrows, True, Me.ModeValue(1) = 1)
         arrows.ToolTipText = "Show only arrows"
 
@@ -133,11 +214,16 @@ Public Class GumballComp
     End Sub
 
     Private Sub Menu_Attributes()
-        If (AttForm Is Nothing) Then
+        Try
+            If AttForm IsNot Nothing AndAlso Not AttForm.IsDisposed Then
+                AttForm.RequestDismiss()
+                Exit Sub
+            End If
             AttForm = New FormAttributes(Me)
-        Else
-            AttForm.Dispose()
-        End If
+        Catch ex As Exception
+            AttForm = Nothing
+            Rhino.RhinoApp.WriteLine("GumballGH: could not open Attributes — " & ex.Message)
+        End Try
     End Sub
 
     Private Sub Menu_OnlyArrows()
@@ -183,6 +269,16 @@ Public Class GumballComp
         Me.MyGumball = Nothing
         Me.ClearData()
         Me.ExpireSolution(True)
+    End Sub
+
+    Private Sub Menu_ProximityCache()
+        If (MyGumball IsNot Nothing) Then Me.RecordUndoEvent("Proximity cache", New GbUndo(Me.MyGumball))
+        Me.ProximityCache = Not Me.ProximityCache
+    End Sub
+
+    Private Sub Menu_PreserveOnChanges()
+        If (MyGumball IsNot Nothing) Then Me.RecordUndoEvent("Preserve on changes", New GbUndo(Me.MyGumball))
+        Me.PreserveTransformsOnGeometryChange = Not Me.PreserveTransformsOnGeometryChange
     End Sub
 #End Region
 
@@ -257,12 +353,41 @@ Public Class GumballComp
     Public MyGumball As GhGumball
     Private Cache As New DataTree(Of GeometryBase)
     Private Paths As GH_Path()
+    ''' <summary>Parallel to flattened input leaves: index into MyGumball geometry/Xform (-1 means null input at that leaf).</summary>
+    Private _leafToGumballSlot As Integer()
     Public AttForm As FormAttributes = Nothing
     Private MyGumballAttributes As Integer() = New Integer(9) {1, 1, 2, 1, 1, 50, 5, 2, 15, 35}
 
     Private ModeValueType As New Integer
     Private ModeValueAlign As New Boolean
     Private ModeValueAtt As New Integer
+
+    ''' <summary>When true, upstream geometry updates try to keep existing gumball transform stacks per non-null index instead of rebuilding from scratch.</summary>
+    Public Property PreserveTransformsOnGeometryChange As Boolean
+        Get
+            Return _preserveTransformsOnGeometryChange
+        End Get
+        Set(value As Boolean)
+            _preserveTransformsOnGeometryChange = value
+        End Set
+    End Property
+
+    Private _preserveTransformsOnGeometryChange As Boolean = False
+
+    ''' <summary>
+    ''' When upstream changes, remap transforms onto new items by greedy nearest centroid (from cached upstream geometry).
+    ''' Precedence over <see cref="PreserveTransformsOnGeometryChange"/> when resolving.
+    ''' </summary>
+    Public Property ProximityCache As Boolean
+        Get
+            Return _proximityCacheOnGeometryChange
+        End Get
+        Set(value As Boolean)
+            _proximityCacheOnGeometryChange = value
+        End Set
+    End Property
+
+    Private _proximityCacheOnGeometryChange As Boolean = False
 
     Protected Overrides Sub SolveInstance(DA As IGH_DataAccess)
         Dim Data As New GH_Structure(Of Types.IGH_GeometricGoo)
@@ -276,31 +401,67 @@ Public Class GumballComp
             If (Me.Params.Input(1).VolatileDataCount > 0) Then
                 Dim gg As Types.IGH_GeometricGoo = Nothing
                 DA.GetData(1, gg)
-                Dim g As GeometryBase = Grasshopper.Kernel.GH_Convert.ToGeometryBase(gg).Duplicate()
-                If ((MyGumball.GeometrytoAlign Is Nothing)) Then
-                    MyGumball.AlignToGeometry(g)
-                Else
-                    Dim gtree As New DataTree(Of GeometryBase)
-                    gtree.Add(g, New GH_Path(0))
-                    Dim atree As New DataTree(Of GeometryBase)
-                    atree.Add(MyGumball.GeometrytoAlign, New GH_Path(0))
+                If gg IsNot Nothing Then
+                    Dim gbAlign As GeometryBase = Grasshopper.Kernel.GH_Convert.ToGeometryBase(gg)
+                    If gbAlign IsNot Nothing Then
+                        Dim g As GeometryBase = gbAlign.Duplicate()
+                        If ((MyGumball.GeometrytoAlign Is Nothing)) Then
+                            MyGumball.AlignToGeometry(g)
+                        Else
+                            Dim gtree As New DataTree(Of GeometryBase)
+                            gtree.Add(g, New GH_Path(0))
+                            Dim atree As New DataTree(Of GeometryBase)
+                            atree.Add(MyGumball.GeometrytoAlign, New GH_Path(0))
 
-                    If Not (AreEquals(gtree, atree)) Then
-                        MyGumball.AlignToGeometry(g)
-                        If (Attributes.Selected) Then MyGumball.ShowGumballs()
+                            If Not (AreEquals(gtree, atree)) Then
+                                MyGumball.AlignToGeometry(g)
+                                If (Attributes.Selected) Then MyGumball.ShowGumballs()
+                            End If
+                        End If
                     End If
                 End If
             End If
-            End If
+        End If
 
-        'GeometryGoo to GeometryBase.
+        'GeometryGoo to GeometryBase (nulls preserved as Nothing per leaf).
         For Each b As GH_Path In Data.Paths
             For Each d As Types.IGH_GeometricGoo In Data.DataList(b)
-                Dim g As GeometryBase = Grasshopper.Kernel.GH_Convert.ToGeometryBase(d).Duplicate()
-                If (g Is Nothing) Then Continue For
-                InputData.Add(g, b)
+                If d Is Nothing Then
+                    InputData.Add(Nothing, b)
+                Else
+                    Dim baseGeo As GeometryBase = Grasshopper.Kernel.GH_Convert.ToGeometryBase(d)
+                    If baseGeo Is Nothing Then
+                        InputData.Add(Nothing, b)
+                    Else
+                        InputData.Add(baseGeo.Duplicate(), b)
+                    End If
+                End If
             Next
         Next
+
+        Dim nonNullGeom As New List(Of GeometryBase)(InputData.DataCount)
+        Dim leafCount As Integer = InputData.DataCount
+        If leafCount = 0 Then
+            _leafToGumballSlot = Nothing
+        Else
+            _leafToGumballSlot = New Integer(leafCount - 1) {}
+            Dim leafIx As Integer = 0
+            For bi As Int32 = 0 To InputData.BranchCount - 1
+                For lj As Int32 = 0 To InputData.Branch(bi).Count - 1
+                    Dim gbLeaf As GeometryBase = InputData.Branch(bi)(lj)
+                    If gbLeaf Is Nothing Then
+                        _leafToGumballSlot(leafIx) = -1
+                    Else
+                        Dim dup As GeometryBase = gbLeaf.Duplicate()
+                        dup.MakeDeformable()
+                        _leafToGumballSlot(leafIx) = nonNullGeom.Count
+                        nonNullGeom.Add(dup)
+                    End If
+                    leafIx += 1
+                Next
+            Next
+        End If
+
 
         'Set cache.
         If (Cache.DataCount = 0) Then
@@ -308,33 +469,48 @@ Public Class GumballComp
         Else
             'Test if new inputdata
             If Not (AreEquals(Cache, InputData)) Then
+                Dim resynced As GhGumball = Nothing
+                If ProximityCache AndAlso MyGumball IsNot Nothing AndAlso nonNullGeom.Count > 0 Then
+                    resynced = GhGumball.CreateResyncPreservingTransformsProximity(nonNullGeom.ToArray(), Me, MyGumball, Cache)
+                ElseIf PreserveTransformsOnGeometryChange AndAlso MyGumball IsNot Nothing AndAlso nonNullGeom.Count > 0 Then
+                    resynced = GhGumball.CreateResyncPreservingTransforms(nonNullGeom.ToArray(), Me, MyGumball)
+                End If
                 Cache.Clear()
                 If (MyGumball IsNot Nothing) Then MyGumball.Dispose()
                 MyGumball = Nothing
                 SetCache(InputData)
+                If resynced IsNot Nothing Then
+                    MyGumball = resynced
+                    If (Me.Attributes.Selected) Then MyGumball.ShowGumballs()
+                End If
             End If
         End If
 
-        'Create Gumball class.
-        If (MyGumball Is Nothing) Then
-            Dim inputDataFree As GeometryBase() = New GeometryBase(InputData.DataCount - 1) {}
-            Dim tolist As List(Of GeometryBase) = InputData.AllData()
-            For i As Int32 = 0 To tolist.Count - 1
-                inputDataFree(i) = tolist(i).Duplicate
-                inputDataFree(i).MakeDeformable()
-            Next
-            MyGumball = New GhGumball(inputDataFree, Me)
+        'Create Gumball class for non-null geometry only (no empty GhGumball array).
+        If nonNullGeom.Count = 0 Then
+            If (MyGumball IsNot Nothing) Then
+                MyGumball.Dispose()
+                MyGumball = Nothing
+            End If
+        ElseIf (MyGumball Is Nothing) Then
+            MyGumball = New GhGumball(nonNullGeom.ToArray(), Me)
             If (Me.Attributes.Selected) Then MyGumball.ShowGumballs()
         End If
 
-        'Set output data.
+        'Set output data (null leaves pass through unchanged on both outputs).
         Dim DataOutput As New GH_Structure(Of Types.IGH_GeometricGoo)
         Dim DataOutput2 As New GH_Structure(Of Types.GH_Transform)
-        If (Paths.Count > 0) Then
-            For i As Int32 = 0 To MyGumball.Count - 1
-                Dim d As Types.IGH_GeometricGoo = GH_Convert.ToGeometricGoo(MyGumball.Geometry(i))
-                DataOutput.Append(d, Paths(i))
-                DataOutput2.Append(MyGumball.Xform(i), Paths(i))
+        If (Paths IsNot Nothing AndAlso Paths.Length > 0 AndAlso _leafToGumballSlot IsNot Nothing) Then
+            For leaf As Integer = 0 To Paths.Length - 1
+                Dim slot As Integer = _leafToGumballSlot(leaf)
+                If slot < 0 OrElse MyGumball Is Nothing Then
+                    DataOutput.Append(Nothing, Paths(leaf))
+                    DataOutput2.Append(Nothing, Paths(leaf))
+                Else
+                    Dim d As Types.IGH_GeometricGoo = GH_Convert.ToGeometricGoo(MyGumball.Geometry(slot))
+                    DataOutput.Append(d, Paths(leaf))
+                    DataOutput2.Append(MyGumball.Xform(slot), Paths(leaf))
+                End If
             Next
         End If
 
@@ -346,11 +522,21 @@ Public Class GumballComp
     Private Sub SetCache(_InputData As DataTree(Of GeometryBase))
 
         Cache.Clear()
+        If (_InputData.DataCount = 0) Then
+            Paths = New GH_Path(-1) {}
+            Exit Sub
+        End If
+
         Paths = New GH_Path(_InputData.DataCount - 1) {}
         Dim count As New Integer
         For i As Int32 = 0 To _InputData.BranchCount - 1
             For j As Int32 = 0 To _InputData.Branch(i).Count - 1
-                Cache.Add(_InputData.Branch(i)(j).Duplicate(), _InputData.Path(i))
+                Dim cell As GeometryBase = _InputData.Branch(i)(j)
+                If cell Is Nothing Then
+                    Cache.Add(Nothing, _InputData.Path(i))
+                Else
+                    Cache.Add(cell.Duplicate(), _InputData.Path(i))
+                End If
                 Paths(count) = _InputData.Path(i)
                 count += 1
             Next
@@ -375,23 +561,31 @@ Public Class GumballComp
                     Return False
                     Exit Function
                 End If
-                If (A.Branch(br)(i).ObjectType <> B.Branch(br)(i).ObjectType) Then
+                Dim aCell As GeometryBase = A.Branch(br)(i)
+                Dim bCell As GeometryBase = B.Branch(br)(i)
+                If aCell Is Nothing Then
+                    If bCell Is Nothing Then Continue For
+                    Return False
+                    Exit Function
+                End If
+                If bCell Is Nothing Then Return False : Exit Function
+                If (aCell.ObjectType <> bCell.ObjectType) Then
                     ' Rhino.RhinoApp.WriteLine("Distinto ObjectType")
                     Return False
                     Exit Function
                 End If
-                Select Case A.Branch(br)(i).ObjectType
+                Select Case aCell.ObjectType
                     Case Rhino.DocObjects.ObjectType.Point
-                        Dim ptA As Rhino.Geometry.Point = DirectCast(A.Branch(br)(i), Rhino.Geometry.Point)
-                        Dim ptB As Rhino.Geometry.Point = DirectCast(B.Branch(br)(i), Rhino.Geometry.Point)
+                        Dim ptA As Rhino.Geometry.Point = DirectCast(aCell, Rhino.Geometry.Point)
+                        Dim ptB As Rhino.Geometry.Point = DirectCast(bCell, Rhino.Geometry.Point)
                         If (New Point3d(Math.Round(ptA.Location.X, 4), Math.Round(ptA.Location.Y, 4), Math.Round(ptA.Location.Z, 4)) <>
             New Point3d(Math.Round(ptB.Location.X, 4), Math.Round(ptB.Location.Y, 4), Math.Round(ptB.Location.Z, 4))) Then
                             Return False
                             Exit Function
                         End If
                     Case Rhino.DocObjects.ObjectType.Curve
-                        Dim CrvA As Curve = DirectCast(A.Branch(br)(i), Curve)
-                        Dim CrvB As Curve = DirectCast(B.Branch(br)(i), Curve)
+                        Dim CrvA As Curve = DirectCast(aCell, Curve)
+                        Dim CrvB As Curve = DirectCast(bCell, Curve)
                         If (CrvA.ObjectType <> CrvB.ObjectType) Then
                             Return False
                             Exit Function
@@ -415,8 +609,8 @@ Public Class GumballComp
                         Next
 
                     Case Rhino.DocObjects.ObjectType.Brep
-                        Dim BrpA As Brep = DirectCast(A.Branch(br)(i), Brep)
-                        Dim BrpB As Brep = DirectCast(B.Branch(br)(i), Brep)
+                        Dim BrpA As Brep = DirectCast(aCell, Brep)
+                        Dim BrpB As Brep = DirectCast(bCell, Brep)
                         If (BrpA.Vertices.Count <> BrpB.Vertices.Count) Then
                             '     Rhino.RhinoApp.WriteLine("Distinto VerticesCount")
                             Return False
@@ -441,8 +635,8 @@ Public Class GumballComp
                             End If
                         Next
                     Case Rhino.DocObjects.ObjectType.Mesh
-                        Dim mshA As Mesh = DirectCast(A.Branch(br)(i), Mesh)
-                        Dim mshB As Mesh = DirectCast(B.Branch(br)(i), Mesh)
+                        Dim mshA As Mesh = DirectCast(aCell, Mesh)
+                        Dim mshB As Mesh = DirectCast(bCell, Mesh)
                         If (mshA.Vertices.Count <> mshB.Vertices.Count) Then
                             Return False
                             Exit Function
@@ -544,6 +738,8 @@ Public Class GhGumball
     Public Count As Integer
     Public Component As GumballComp
     Public GeometrytoAlign As GeometryBase
+    ''' <remarks>Listening only between grip mouse-down (non-numeric pick) and mouse-up so Esc cancels preview.</remarks>
+    Private _rhinoEscapeSubscribed As Boolean
 
 #Region "New/Show/Hide/Dispose"
     Sub New(Geo As GeometryBase(), comp As GumballComp)
@@ -636,6 +832,133 @@ Public Class GhGumball
 
     End Sub
 
+    ''' <summary>
+    ''' After upstream geometry edits, rebuild a gumball for <paramref name="newGeoms"/> and carry over compound transforms where object types align by index.
+    ''' </summary>
+    Friend Shared Function CreateResyncPreservingTransforms(newGeoms As GeometryBase(), comp As GumballComp, oldGb As GhGumball) As GhGumball
+        Return CreateResyncPreservingTransformsWithMap(newGeoms, comp, oldGb, BuildIndexSlotMap(newGeoms.Length, oldGb.Count))
+    End Function
+
+    ''' <summary>
+    ''' Like <see cref="CreateResyncPreservingTransforms"/>, but each new slot takes transforms from the prior gumball entry whose cached upstream bbox centre is nearest (same object type).
+    ''' </summary>
+    Friend Shared Function CreateResyncPreservingTransformsProximity(newGeoms As GeometryBase(), comp As GumballComp, oldGb As GhGumball, oldCache As DataTree(Of GeometryBase)) As GhGumball
+        Dim oldCentres As New List(Of Point3d)
+        Dim oldKinds As New List(Of Rhino.DocObjects.ObjectType)
+        ExtractNonNullBoundingBoxMeta(oldCache, oldCentres, oldKinds)
+        If oldCentres.Count <> oldGb.Count Then
+            Return CreateResyncPreservingTransforms(newGeoms, comp, oldGb)
+        End If
+        Return CreateResyncPreservingTransformsWithMap(newGeoms, comp, oldGb, GreedyCentroidSlotMap(oldCentres, oldKinds, newGeoms))
+    End Function
+
+    Private Structure ProximityCand
+        Public Dist As Double
+        Public OldIx As Integer
+        Public NewIx As Integer
+    End Structure
+
+    Private Shared Function BuildIndexSlotMap(newCount As Integer, oldCount As Integer) As Integer()
+        Dim map(newCount - 1) As Integer
+        For j As Integer = 0 To newCount - 1
+            map(j) = If(j < oldCount, j, -1)
+        Next
+        Return map
+    End Function
+
+    Private Shared Sub ExtractNonNullBoundingBoxMeta(tree As DataTree(Of GeometryBase), centres As List(Of Point3d), kinds As List(Of Rhino.DocObjects.ObjectType))
+        For bi As Integer = 0 To tree.BranchCount - 1
+            For j As Integer = 0 To tree.Branch(bi).Count - 1
+                Dim cell As GeometryBase = tree.Branch(bi)(j)
+                If cell IsNot Nothing Then
+                    centres.Add(cell.GetBoundingBox(True).Center)
+                    kinds.Add(cell.ObjectType)
+                End If
+            Next
+        Next
+    End Sub
+
+    Private Shared Function GreedyCentroidSlotMap(oldCentres As List(Of Point3d), oldKinds As List(Of Rhino.DocObjects.ObjectType), newGeoms As GeometryBase()) As Integer()
+        Dim nNew As Integer = newGeoms.Length
+        Dim nOld As Integer = oldCentres.Count
+        Dim map As Integer() = Enumerable.Repeat(-1, nNew).ToArray()
+        If nOld = 0 OrElse nNew = 0 Then Return map
+
+        Dim cands As New List(Of ProximityCand)
+        For io As Integer = 0 To nOld - 1
+            For jn As Integer = 0 To nNew - 1
+                If oldKinds(io) = newGeoms(jn).ObjectType Then
+                    cands.Add(New ProximityCand With {
+                        .Dist = oldCentres(io).DistanceTo(newGeoms(jn).GetBoundingBox(True).Center),
+                        .OldIx = io,
+                        .NewIx = jn
+                    })
+                End If
+            Next
+        Next
+        cands.Sort(Function(a As ProximityCand, b As ProximityCand) a.Dist.CompareTo(b.Dist))
+
+        Dim usedOld As New BitArray(nOld)
+        For Each c As ProximityCand In cands
+            If Not usedOld(c.OldIx) AndAlso map(c.NewIx) < 0 Then
+                usedOld(c.OldIx) = True
+                map(c.NewIx) = c.OldIx
+            End If
+        Next
+        Return map
+    End Function
+
+    Friend Shared Function CreateResyncPreservingTransformsWithMap(newGeoms As GeometryBase(), comp As GumballComp, oldGb As GhGumball, newSlotToOldSlot As Integer()) As GhGumball
+        Dim gb As New GhGumball(newGeoms, comp)
+        Dim clonedAtt(9) As Integer
+        Array.Copy(oldGb.CustomAppearance, clonedAtt, 10)
+        gb.CustomAppearance = clonedAtt
+        gb.GeometrytoAlign = If(oldGb.GeometrytoAlign Is Nothing, Nothing, oldGb.GeometrytoAlign.Duplicate())
+
+        Dim n As Integer = Math.Min(gb.Count, newSlotToOldSlot.Length)
+        For j As Integer = 0 To n - 1
+            Dim oldIx As Integer = newSlotToOldSlot(j)
+            If oldIx < 0 OrElse oldIx >= oldGb.Count Then Continue For
+            If oldGb.Geometry(oldIx).ObjectType <> gb.Geometry(j).ObjectType Then Continue For
+
+            gb.Xform(j) = New Types.GH_Transform()
+            For Each t As Grasshopper.Kernel.Types.Transforms.ITransform In oldGb.Xform(oldIx).CompoundTransforms
+                gb.Xform(j).CompoundTransforms.Add(t.Duplicate())
+            Next
+            gb.Xform(j).ClearCaches()
+
+            ApplyCompoundGenericTransformsInOrder(gb.Geometry(j), gb.Xform(j))
+            gb.RebuildGumballObjectAndConduitAt(j)
+        Next
+
+        Return gb
+    End Function
+
+    Private Shared Sub ApplyCompoundGenericTransformsInOrder(geo As GeometryBase, xf As Types.GH_Transform)
+        For Each t As Grasshopper.Kernel.Types.Transforms.ITransform In xf.CompoundTransforms
+            Dim gen = TryCast(t, Grasshopper.Kernel.Types.Transforms.Generic)
+            If gen Is Nothing Then Continue For
+            geo.Transform(gen.Transform)
+        Next
+    End Sub
+
+    Private Sub RebuildGumballObjectAndConduitAt(i As Integer)
+        Gumballs(i).Dispose()
+        Dim geo As GeometryBase = Geometry(i)
+        Dim gumBall As New Rhino.UI.Gumball.GumballObject
+        If (geo.ObjectType = Rhino.DocObjects.ObjectType.Point) Then
+            Dim pt As Rhino.Geometry.Point = DirectCast(geo, Rhino.Geometry.Point)
+            gumBall.SetFromPlane(New Plane(pt.Location, Vector3d.XAxis, Vector3d.YAxis))
+        ElseIf (geo.ObjectType = Rhino.DocObjects.ObjectType.Curve) Then
+            Dim crv As Rhino.Geometry.Curve = DirectCast(geo, Rhino.Geometry.Curve)
+            gumBall.SetFromCurve(crv)
+        Else
+            gumBall.SetFromBoundingBox(geo.GetBoundingBox(True))
+        End If
+        Gumballs(i) = gumBall
+        Conduits(i).SetBaseGumball(gumBall, Appearances(i))
+    End Sub
+
     Sub New(Reader As GH_IO.Serialization.GH_IReader, comp As GumballComp)
 
         If Not (Reader.ChunkExists("gbroot")) Then Exit Sub
@@ -708,6 +1031,8 @@ Public Class GhGumball
             comp.ModeValue(0) = att1.GetInt32("valmode", 0)
             comp.ModeValue(1) = att1.GetInt32("attmode", 1)
             comp.ModeValue(2) = att1.GetBoolean("aligntogeometry", 2)
+            comp.PreserveTransformsOnGeometryChange = att1.GetBoolean("preservexf", 3)
+            comp.ProximityCache = att1.GetBoolean("proximitycache", 4)
 
             'End reader.
 
@@ -804,6 +1129,8 @@ Public Class GhGumball
     End Sub
 
     Public Sub Dispose()
+        CloseNumericTextBoxIfAny()
+        TearDownRhinoEscapeHandler()
         For i As Int32 = 0 To Count - 1
             Conduits(i).Enabled = False
             Conduits(i).Dispose()
@@ -976,17 +1303,28 @@ Public Class GhGumball
     Private SaveUndo As Boolean = False
     Private TextBox As FormTextBox = Nothing
     Public ValueString As String = String.Empty
-    Private Keyboard As New Microsoft.VisualBasic.Devices.Keyboard
+
+    ''' <summary>If the numeric float is orphaned (GhGumball MouseDown did not run), drop the WinForms reference only — does not cancel gumball Index.</summary>
+    Friend Sub ForgetFloatingTextBox()
+        TextBox = Nothing
+    End Sub
+
+    ''' <summary>Called when the numeric FormTextBox closes so we do not keep a disposed reference.</summary>
+    Friend Sub DetachTextBoxForm()
+        ForgetFloatingTextBox()
+    End Sub
+
+    ''' <summary>If the user dismisses numeric input with an empty value, clear pick state.</summary>
+    Friend Sub CancelPendingNumericInput()
+        ValueString = String.Empty
+        Index = -1
+        SaveUndo = False
+    End Sub
 
     Protected Overrides Sub OnMouseDown(e As Rhino.UI.MouseCallbackEventArgs)
         MyBase.OnMouseDown(e)
+        CloseNumericTextBoxIfAny()
         Index = -1
-
-        If (TextBox IsNot Nothing) Then
-            TextBox.Dispose()
-            TextBox.Close()
-            TextBox = Nothing
-        End If
 
         If (e.Button <> MouseButtons.Left) Then Exit Sub
 
@@ -1004,13 +1342,61 @@ Public Class GhGumball
                 Index = i
                 SaveUndo = True
                 e.Cancel = True
-                If (Keyboard.CtrlKeyDown) Then
-                    TextBox = New FormTextBox(Rhino.RhinoDoc.ActiveDoc.Views.ActiveView.ClientToScreen(e.ViewportPoint), Me)
+                Dim ctrlNumericPick As Boolean = ((Control.ModifierKeys And Keys.Control) <> Keys.None)
+                If (ctrlNumericPick) Then
+                    Dim screenPt As Drawing.Point = Control.MousePosition
+                    TextBox = New FormTextBox(screenPt, Me)
+                Else
+                    EnsureRhinoEscapeHandler()
                 End If
                 Exit For
             End If
         Next
 
+    End Sub
+
+    Private Sub EnsureRhinoEscapeHandler()
+        If _rhinoEscapeSubscribed Then Return
+        AddHandler Rhino.RhinoApp.EscapeKeyPressed, AddressOf OnRhinoEscapePressed
+        _rhinoEscapeSubscribed = True
+    End Sub
+
+    Private Sub TearDownRhinoEscapeHandler()
+        If Not _rhinoEscapeSubscribed Then Return
+        RemoveHandler Rhino.RhinoApp.EscapeKeyPressed, AddressOf OnRhinoEscapePressed
+        _rhinoEscapeSubscribed = False
+    End Sub
+
+    Private Sub OnRhinoEscapePressed(sender As Object, e As EventArgs)
+        If TextBox IsNot Nothing Then Return
+        If Index < 0 OrElse Index >= Count Then Return
+        If Conduits(Index).PickResult.Mode = Rhino.UI.Gumball.GumballMode.None Then Return
+        CancelActiveGripDragViaEscape()
+    End Sub
+
+    ''' <summary>Abort in-viewport drag (move/rotate/scale) without committing GumballTransform to geometry.</summary>
+    Private Sub CancelActiveGripDragViaEscape()
+        Dim ix As Integer = Index
+        If ix >= 0 AndAlso ix < Count Then
+            Try
+                Dim c As Rhino.UI.Gumball.GumballDisplayConduit = Conduits(ix)
+                c.PreTransform = Transform.Identity
+                c.SetBaseGumball(Gumballs(ix), Appearances(ix))
+                SaveUndo = False
+            Catch
+            End Try
+        End If
+        Index = -1
+        Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
+        TearDownRhinoEscapeHandler()
+    End Sub
+
+    ''' <summary>Closes the numeric float and clears pending pick state; use Close() only (no Dispose-before-Close) so the native window is destroyed on macOS.</summary>
+    Private Sub CloseNumericTextBoxIfAny()
+        If TextBox Is Nothing Then Return
+        Dim tb As FormTextBox = TextBox
+        TextBox = Nothing
+        tb.DismissWithoutCommit()
     End Sub
 
     Protected Overrides Sub OnMouseMove(e As Rhino.UI.MouseCallbackEventArgs)
@@ -1049,7 +1435,15 @@ Public Class GhGumball
     End Sub
 
     Protected Overrides Sub OnMouseUp(e As Rhino.UI.MouseCallbackEventArgs)
+        TearDownRhinoEscapeHandler()
+
         MyBase.OnMouseUp(e)
+
+        ' Ctrl+pick opens the numeric form on MouseDown; MouseUp would otherwise clear Index before Enter is pressed.
+        If (TextBox IsNot Nothing) Then
+            e.Cancel = True
+            Exit Sub
+        End If
 
         If (Index = -1) Or (Index >= Count) Or (ValueString <> String.Empty) Then Exit Sub
 
@@ -1102,7 +1496,9 @@ Public Class GhGumball
 
     Public Sub TransformFromTextBox()
 
-        If (TextBox IsNot Nothing) AndAlso (ValueString IsNot String.Empty) AndAlso (Index > -1) Then
+        If String.IsNullOrWhiteSpace(ValueString) OrElse (Index < 0) OrElse (Index >= Count) Then
+            Exit Sub
+        End If
 
             Me.Component.RecordUndoEvent("Gumball Drag", New GbUndo(Me))
 
@@ -1227,7 +1623,6 @@ Public Class GhGumball
             End If
             Index = -1
             ValueString = String.Empty
-        End If
     End Sub
 #End Region
 
@@ -1423,7 +1818,9 @@ Public Class GhGumball
         '                               |
         '                               ├─valmode
         '                               ├─attmode
-        '                               └─aligntogeometry
+        '                               ├─aligntogeometry
+        '                               ├─preservexf
+        '                               └─proximitycache
 
         Try
             Dim i As New Integer
@@ -1488,6 +1885,8 @@ Public Class GhGumball
             att1.SetInt32("valmode", 0, Me.Component.ModeValue(0))
             att1.SetInt32("attmode", 1, Me.Component.ModeValue(1))
             att1.SetBoolean("aligntogeometry", 2, Me.Component.ModeValue(2))
+            att1.SetBoolean("preservexf", 3, Me.Component.PreserveTransformsOnGeometryChange)
+            att1.SetBoolean("proximitycache", 4, Me.Component.ProximityCache)
 
         Catch ex As Exception
             Rhino.RhinoApp.WriteLine("WRITER_GB; " & ex.ToString())
@@ -1569,6 +1968,8 @@ Public Class GhGumball
             Component.ModeValue(0) = att1.GetInt32("valmode", 0)
             Component.ModeValue(1) = att1.GetInt32("attmode", 1)
             Component.ModeValue(2) = att1.GetBoolean("aligntogeometry", 2)
+            Component.PreserveTransformsOnGeometryChange = att1.GetBoolean("preservexf", 3)
+            Component.ProximityCache = att1.GetBoolean("proximitycache", 4)
 
             'End reader.
 
@@ -1684,36 +2085,172 @@ End Class
 Public Class FormAttributes
     Inherits System.Windows.Forms.Form
 
+    ''' <summary>Backdrop click (Rhino viewport) dismissal, same routing as numeric gumball entry.</summary>
+    Friend Shared Sub RequestDismissFromBackdropMouse()
+        Dim f As FormAttributes = _activeInstance
+        If f Is Nothing OrElse f.IsDisposed Then Return
+        f.TryDismissFromOutsideRhinoGesture()
+    End Sub
+
+    Private Shared _activeInstance As FormAttributes
+    Private _committing As Boolean
+    Private _outsideDismissReady As Boolean
+    Private _suppressBackdropDismissUntil As Integer
+    Private _hookedCanvas As GH_Canvas
+
     Private Component As GumballComp
     Private CanSend As Boolean
 
     Sub New(Comp As GumballComp)
+        CloseStaleAttributesFloat()
         Component = Comp
+        _activeInstance = Me
         InitializeComponent()
-        Me.Show()
+        GumballNumericBackdropMouse.Instance.EnsureEnabled()
+        _suppressBackdropDismissUntil = Environment.TickCount + 1200
+        Dim ownerForm As Form = TryCast(Grasshopper.Instances.DocumentEditor, Form)
+        If ownerForm IsNot Nothing Then
+            Show(ownerForm)
+        Else
+            Show()
+        End If
+    End Sub
+
+    Private Shared Sub CloseStaleAttributesFloat()
+        If (_activeInstance Is Nothing OrElse _activeInstance.IsDisposed) Then Return
+        Try
+            _activeInstance.RequestDismiss()
+        Catch
+            Try
+                _activeInstance.Close()
+            Catch
+            End Try
+        End Try
+    End Sub
+
+    Friend Sub RequestDismiss()
+        If _committing Then Return
+        _committing = True
+        DetachGrasshopperCanvasDismissHookAttributes()
+        Try
+            Close()
+        Catch
+        End Try
+    End Sub
+
+    Private Sub TryDismissFromOutsideRhinoGesture()
+        If _committing OrElse Not _outsideDismissReady Then Return
+        If Environment.TickCount < _suppressBackdropDismissUntil Then Return
+        If Not Visible Then Return
+        Dim self As FormAttributes = Me
+        BeginInvoke(New Action(Sub()
+                                   If self._committing Then Return
+                                   If Not self.Visible Then Return
+                                   self.RequestDismiss()
+                               End Sub))
+    End Sub
+
+    Private Sub Canvas_MouseDownDismissHookAttributes(sender As Object, e As MouseEventArgs)
+        If _committing OrElse Not _outsideDismissReady Then Return
+        If Environment.TickCount < _suppressBackdropDismissUntil Then Return
+        If e.Button <> MouseButtons.Left Then Return
+        Dim cv As GH_Canvas = TryCast(sender, GH_Canvas)
+        If cv Is Nothing Then Return
+        Dim screenPt As Drawing.Point = cv.PointToScreen(e.Location)
+        If Bounds.Contains(screenPt) Then Return
+        TryDismissFromOutsideRhinoGesture()
+    End Sub
+
+    Private Shared Function TryResolveGrasshopperCanvasAttributes() As GH_Canvas
+        Dim cv As GH_Canvas = Grasshopper.Instances.ActiveCanvas
+        If cv IsNot Nothing Then Return cv
+        Dim ed As Control = TryCast(Grasshopper.Instances.DocumentEditor, Control)
+        If ed Is Nothing Then Return Nothing
+        Return FindDescendantCanvasAttributes(ed)
+    End Function
+
+    Private Shared Function FindDescendantCanvasAttributes(root As Control) As GH_Canvas
+        Dim q As GH_Canvas = TryCast(root, GH_Canvas)
+        If q IsNot Nothing Then Return q
+        For Each ch As Control In root.Controls
+            Dim n As GH_Canvas = FindDescendantCanvasAttributes(ch)
+            If n IsNot Nothing Then Return n
+        Next
+        Return Nothing
+    End Function
+
+    Private Sub AttachGrasshopperCanvasDismissHookAttributes()
+        DetachGrasshopperCanvasDismissHookAttributes()
+        Dim cv As GH_Canvas = TryResolveGrasshopperCanvasAttributes()
+        If cv Is Nothing Then Return
+        _hookedCanvas = cv
+        AddHandler _hookedCanvas.MouseDown, AddressOf Canvas_MouseDownDismissHookAttributes
+    End Sub
+
+    Private Sub DetachGrasshopperCanvasDismissHookAttributes()
+        If (_hookedCanvas Is Nothing) Then Return
+        RemoveHandler _hookedCanvas.MouseDown, AddressOf Canvas_MouseDownDismissHookAttributes
+        _hookedCanvas = Nothing
     End Sub
 
 #Region "Events"
+    Private Shared Sub SafeNumericValue(nud As NumericUpDown, v As Integer)
+        Dim d As Decimal = CDec(v)
+        If d < nud.Minimum Then d = nud.Minimum
+        If d > nud.Maximum Then d = nud.Maximum
+        nud.Value = d
+    End Sub
+
     Private Sub Form1_Load(sender As Object, e As EventArgs) Handles MyBase.Load
         CanSend = False
         If (Component.MyGumball IsNot Nothing) Then
-            Me.ButtTranslate.Checked = Component.MyGumball.CustomAppearance(0)
-            Me.ButtPlane.Checked = Component.MyGumball.CustomAppearance(1)
-            Me.ButtFree.Checked = Component.MyGumball.CustomAppearance(2)
-            Me.ButtRotate.Checked = Component.MyGumball.CustomAppearance(3)
-            Me.ButtScale.Checked = Component.MyGumball.CustomAppearance(4)
-            Me.NumRad.Value = New Decimal(New Integer() {Component.MyGumball.CustomAppearance(5), 0, 0, 0})
-            Me.NumAH.Value = New Decimal(New Integer() {Component.MyGumball.CustomAppearance(6), 0, 0, 0})
-            Me.NumThk.Value = New Decimal(New Integer() {Component.MyGumball.CustomAppearance(7), 0, 0, 0})
-            Me.NumPS.Value = New Decimal(New Integer() {Component.MyGumball.CustomAppearance(8), 0, 0, 0})
-            Me.NumPD.Value = New Decimal(New Integer() {Component.MyGumball.CustomAppearance(9), 0, 0, 0})
+            Dim ca As GhGumball = Component.MyGumball
+            Me.ButtTranslate.Checked = (ca.CustomAppearance(0) <> 0)
+            Me.ButtPlane.Checked = (ca.CustomAppearance(1) <> 0)
+            Me.ButtFree.Checked = (ca.CustomAppearance(2) <> 0)
+            Me.ButtRotate.Checked = (ca.CustomAppearance(3) <> 0)
+            Me.ButtScale.Checked = (ca.CustomAppearance(4) <> 0)
+            SafeNumericValue(Me.NumRad, ca.CustomAppearance(5))
+            SafeNumericValue(Me.NumAH, ca.CustomAppearance(6))
+            SafeNumericValue(Me.NumThk, ca.CustomAppearance(7))
+            SafeNumericValue(Me.NumPS, ca.CustomAppearance(8))
+            SafeNumericValue(Me.NumPD, ca.CustomAppearance(9))
         End If
         CanSend = True
     End Sub
 
     Private Sub Form1_FormClosed(sender As Object, e As FormClosedEventArgs) Handles MyBase.FormClosed
+        If ReferenceEquals(_activeInstance, Me) Then _activeInstance = Nothing
+        DetachGrasshopperCanvasDismissHookAttributes()
         If (Component.MyGumball IsNot Nothing) Then Component.RecordUndoEvent("Gumball Attributes", New GbUndo(Component.MyGumball))
         Me.Component.AttForm = Nothing
+    End Sub
+
+    Private Sub FormAttributes_Shown(sender As Object, e As EventArgs) Handles MyBase.Shown
+        GumballNumericBackdropMouse.Instance.EnsureEnabled()
+        Dim arm As New Timer With {.Interval = 500}
+        AddHandler arm.Tick,
+            Sub()
+                arm.Stop()
+                arm.Dispose()
+                _outsideDismissReady = True
+                AttachGrasshopperCanvasDismissHookAttributes()
+            End Sub
+        arm.Start()
+        BeginInvoke(New Action(Sub()
+                                   Try
+                                       BringToFront()
+                                       Activate()
+                                   Catch
+                                   End Try
+                               End Sub))
+    End Sub
+
+    Private Sub FormAttributes_KeyDown(sender As Object, e As KeyEventArgs) Handles MyBase.KeyDown
+        If e.KeyCode = Keys.Escape Then
+            e.SuppressKeyPress = True
+            RequestDismiss()
+        End If
     End Sub
 
     Private Sub ButtTranslate_CheckedChanged(sender As Object, e As EventArgs) Handles ButtTranslate.CheckedChanged
@@ -1760,6 +2297,9 @@ Public Class FormAttributes
 #Region "Design"
     Protected Overrides Sub Dispose(ByVal disposing As Boolean)
         Try
+            If disposing Then
+                DetachGrasshopperCanvasDismissHookAttributes()
+            End If
             If disposing AndAlso components IsNot Nothing Then
                 components.Dispose()
             End If
@@ -1973,9 +2513,11 @@ Public Class FormAttributes
         Me.MaximizeBox = False
         Me.MinimizeBox = False
         Me.Name = "Form1"
+        Me.ControlBox = True
+        Me.KeyPreview = True
         Me.ShowIcon = False
+        Me.ShowInTaskbar = False
         Me.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen
-        Me.Owner = Grasshopper.Instances.DocumentEditor
         Me.Text = "Gumball Attributes"
         CType(Me.NumRad, System.ComponentModel.ISupportInitialize).EndInit()
         CType(Me.NumAH, System.ComponentModel.ISupportInitialize).EndInit()
@@ -2009,30 +2551,216 @@ End Class
 Public Class FormTextBox
     Inherits System.Windows.Forms.Form
 
-    Public GB As GhGumball
+    Private Shared _activeInstance As FormTextBox
 
-    Sub New(Loc As System.Drawing.Point, MyOwner As GhGumball)
+    ''' <summary>Second Rhino MouseCallback route: fires for viewport presses even while the numeric WinForms window has focus.</summary>
+    Friend Shared Sub RequestDismissFromBackdropMouse()
+        Dim f As FormTextBox = _activeInstance
+        If f Is Nothing OrElse f.IsDisposed Then Return
+        f.TryDismissFromOutsideRhinoGesture()
+    End Sub
+
+    Public GB As GhGumball
+    Private _committing As Boolean
+    Private _outsideDismissReady As Boolean
+    ''' <summary>Rhino and GH handlers ignore dismiss briefly so the opening ctrl+pick does not close the fresh float.</summary>
+    Private _suppressBackdropDismissUntil As Integer
+    Private _hookedCanvas As GH_Canvas
+
+    Sub New(screenLocation As Drawing.Point, MyOwner As GhGumball)
+        ClosePriorFloatingLeakNoCancelPending()
         GB = MyOwner
-        Me.Location = Loc
         InitializeComponent()
+        Me.StartPosition = FormStartPosition.Manual
+        Dim padX As Integer = 10
+        Dim padY As Integer = -24
+        Dim loc As New Drawing.Point(screenLocation.X + padX, screenLocation.Y + padY)
+        Dim wa As Drawing.Rectangle = System.Windows.Forms.Screen.GetWorkingArea(loc)
+        If (loc.X < wa.Left) Then loc.X = wa.Left
+        If (loc.Y < wa.Top) Then loc.Y = wa.Top
+        If (loc.X + Me.Width > wa.Right) Then loc.X = Math.Max(wa.Left, wa.Right - Me.Width)
+        If (loc.Y + Me.Height > wa.Bottom) Then loc.Y = Math.Max(wa.Top, wa.Bottom - Me.Height)
+        Me.Location = loc
+        _suppressBackdropDismissUntil = Environment.TickCount + 420
+        _activeInstance = Me
+        GumballNumericBackdropMouse.Instance.EnsureEnabled()
         Me.Show()
     End Sub
 
-    Private Sub TextBox1_KeyDown(sender As Object, e As KeyEventArgs) Handles TextBox1.KeyDown
-        If e.KeyData = Keys.Enter Then
-            GB.Component.RecordUndoEvent("Gumball Drag", New GbUndo(GB))
-            GB.TransformFromTextBox()
-            Me.Dispose()
-            Me.Close()
+    Private Shared Sub ClosePriorFloatingLeakNoCancelPending()
+        If (_activeInstance Is Nothing OrElse _activeInstance.IsDisposed) Then Return
+        Dim p As FormTextBox = _activeInstance
+        _activeInstance = Nothing
+        p.SilentCloseLeakWithoutCancelPending()
+    End Sub
+
+    ''' <summary>Orphan/stacked floats: tear down the window without clearing gumball numeric pick state.</summary>
+    Private Sub SilentCloseLeakWithoutCancelPending()
+        If _committing Then Return
+        _committing = True
+        DetachGrasshopperCanvasDismissHookInternal()
+        If GB IsNot Nothing Then GB.ForgetFloatingTextBox()
+        GB = Nothing
+        Try
+            Close()
+        Catch
+        End Try
+    End Sub
+
+    Private Sub TryDismissFromOutsideRhinoGesture()
+        If _committing OrElse Not _outsideDismissReady Then Return
+        If Environment.TickCount < _suppressBackdropDismissUntil Then Return
+        If Not Visible Then Return
+        Dim self As FormTextBox = Me
+        BeginInvoke(New Action(Sub()
+                                   If self._committing Then Return
+                                   If Not self.Visible Then Return
+                                   self.DismissWithoutCommit()
+                               End Sub))
+    End Sub
+
+    Private Sub Canvas_MouseDownDismissHook(sender As Object, e As MouseEventArgs)
+        If _committing OrElse Not _outsideDismissReady Then Return
+        If Environment.TickCount < _suppressBackdropDismissUntil Then Return
+        If e.Button <> MouseButtons.Left Then Return
+        Dim cv As GH_Canvas = TryCast(sender, GH_Canvas)
+        If cv Is Nothing Then Return
+        Dim screenPt As Drawing.Point = cv.PointToScreen(e.Location)
+        If Me.Bounds.Contains(screenPt) Then Return
+        TryDismissFromOutsideRhinoGesture()
+    End Sub
+
+    Private Shared Function TryResolveGrasshopperCanvas() As GH_Canvas
+        Dim cv As GH_Canvas = Grasshopper.Instances.ActiveCanvas
+        If cv IsNot Nothing Then Return cv
+        Dim ed As Control = TryCast(Grasshopper.Instances.DocumentEditor, Control)
+        If ed Is Nothing Then Return Nothing
+        Return FindDescendantCanvas(ed)
+    End Function
+
+    Private Shared Function FindDescendantCanvas(root As Control) As GH_Canvas
+        Dim q As GH_Canvas = TryCast(root, GH_Canvas)
+        If q IsNot Nothing Then Return q
+        For Each ch As Control In root.Controls
+            Dim n As GH_Canvas = FindDescendantCanvas(ch)
+            If n IsNot Nothing Then Return n
+        Next
+        Return Nothing
+    End Function
+
+    Private Sub AttachGrasshopperCanvasDismissHookInternal()
+        DetachGrasshopperCanvasDismissHookInternal()
+        Dim cv As GH_Canvas = TryResolveGrasshopperCanvas()
+        If cv Is Nothing Then Return
+        _hookedCanvas = cv
+        AddHandler _hookedCanvas.MouseDown, AddressOf Canvas_MouseDownDismissHook
+    End Sub
+
+    Private Sub DetachGrasshopperCanvasDismissHookInternal()
+        If (_hookedCanvas Is Nothing) Then Return
+        RemoveHandler _hookedCanvas.MouseDown, AddressOf Canvas_MouseDownDismissHook
+        _hookedCanvas = Nothing
+    End Sub
+
+    Private Shared Sub RefreshBackdropMouseCallbackListening()
+        If (_activeInstance Is Nothing OrElse _activeInstance.IsDisposed) Then
+            GumballNumericBackdropMouse.Instance.Enabled = False
+        Else
+            GumballNumericBackdropMouse.Instance.Enabled = True
         End If
     End Sub
 
+    ''' <summary>Cancel numeric edit (Escape, click outside, lost activation).</summary>
+    Friend Sub DismissWithoutCommit()
+        If (_committing) Then Return
+        _committing = True
+        DetachGrasshopperCanvasDismissHookInternal()
+        If (GB IsNot Nothing) Then GB.CancelPendingNumericInput()
+        Close()
+    End Sub
+
+    Private Sub FormTextBox_Shown(sender As Object, e As EventArgs) Handles MyBase.Shown
+        TextBox1.Focus()
+        GumballNumericBackdropMouse.Instance.EnsureEnabled()
+        AttachGrasshopperCanvasDismissHookInternal()
+        Dim arm As New Timer With {.Interval = 180}
+        AddHandler arm.Tick,
+            Sub()
+                arm.Stop()
+                arm.Dispose()
+                _outsideDismissReady = True
+            End Sub
+        arm.Start()
+    End Sub
+
+    Private Sub TextBox1_LostFocus(sender As Object, e As EventArgs) Handles TextBox1.LostFocus
+        If (Not _outsideDismissReady OrElse _committing) Then Return
+        BeginInvoke(Sub()
+                        If (_committing) Then Return
+                        If (Not Me.Visible) Then Return
+                        If Environment.TickCount < _suppressBackdropDismissUntil Then Return
+                        DismissWithoutCommit()
+                    End Sub)
+    End Sub
+
+    Private Sub FormTextBox_Deactivate(sender As Object, e As EventArgs) Handles MyBase.Deactivate
+        If (Not _outsideDismissReady OrElse _committing) Then Return
+        If Environment.TickCount < _suppressBackdropDismissUntil Then Return
+        DismissWithoutCommit()
+    End Sub
+
+    Private Sub TryCommitEntry()
+        If (_committing OrElse GB Is Nothing OrElse TextBox1 Is Nothing) Then Return
+        _committing = True
+        DetachGrasshopperCanvasDismissHookInternal()
+        Try
+            GB.ValueString = TextBox1.Text.Trim()
+            GB.TransformFromTextBox()
+        Finally
+            Close()
+        End Try
+    End Sub
+
+    Private Sub TextBox1_KeyDown(sender As Object, e As KeyEventArgs) Handles TextBox1.KeyDown
+        If e.KeyCode = Keys.Escape Then
+            e.SuppressKeyPress = True
+            DismissWithoutCommit()
+            Return
+        End If
+        If e.KeyCode = Keys.Enter OrElse e.KeyCode = Keys.Return Then
+            e.SuppressKeyPress = True
+            TryCommitEntry()
+        End If
+    End Sub
+
+    Private Sub TextBox1_KeyPress(sender As Object, e As KeyPressEventArgs) Handles TextBox1.KeyPress
+        If (e.KeyChar = ChrW(13) OrElse e.KeyChar = ChrW(10)) Then
+            e.Handled = True
+            TryCommitEntry()
+        End If
+    End Sub
+
+    Private Sub FormTextBox_FormClosing(sender As Object, e As FormClosingEventArgs) Handles MyBase.FormClosing
+        DetachGrasshopperCanvasDismissHookInternal()
+    End Sub
+
+    Private Sub FormTextBox_FormClosed(sender As Object, e As FormClosedEventArgs) Handles MyBase.FormClosed
+        If ReferenceEquals(_activeInstance, Me) Then
+            _activeInstance = Nothing
+        End If
+        RefreshBackdropMouseCallbackListening()
+        If GB IsNot Nothing Then GB.DetachTextBoxForm()
+    End Sub
+
     Private Sub TextBox1_TextChanged(sender As Object, e As EventArgs) Handles TextBox1.TextChanged
-        GB.ValueString = Me.TextBox1.Text
+        If GB IsNot Nothing Then GB.ValueString = Me.TextBox1.Text
     End Sub
 
     Protected Overrides Sub Dispose(ByVal disposing As Boolean)
         Try
+            If disposing Then
+                DetachGrasshopperCanvasDismissHookInternal()
+            End If
             If disposing AndAlso components IsNot Nothing Then
                 components.Dispose()
             End If
@@ -2054,6 +2782,8 @@ Public Class FormTextBox
         Me.TextBox1.Name = "TextBox1"
         Me.TextBox1.Size = New System.Drawing.Size(100, 20)
         Me.TextBox1.TabIndex = 0
+        Me.TextBox1.Multiline = False
+        Me.TextBox1.AcceptsReturn = False
         '
         'Form1
         '

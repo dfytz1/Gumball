@@ -1,138 +1,69 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
-<Project ToolsVersion="4.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
   <PropertyGroup>
-    <Configuration Condition=" '$(Configuration)' == '' ">Debug64</Configuration>
-    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
-    <ProductVersion>
-    </ProductVersion>
-    <SchemaVersion>
-    </SchemaVersion>
-    <ProjectGuid>{D9B734AC-0EF0-4BA4-8734-349A5DAD4FE4}</ProjectGuid>
-    <OutputType>Library</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
     <RootNamespace>GumballGH</RootNamespace>
     <AssemblyName>GumballGH</AssemblyName>
-    <FileAlignment>512</FileAlignment>
-    <MyType>Windows</MyType>
-    <TargetFrameworkVersion>v4.0</TargetFrameworkVersion>
-  </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug64|AnyCPU' ">
-    <DebugSymbols>true</DebugSymbols>
-    <DebugType>full</DebugType>
-    <DefineDebug>true</DefineDebug>
-    <DefineTrace>true</DefineTrace>
-    <OutputPath>bin\</OutputPath>
-    <DocumentationFile>GumballGH.xml</DocumentationFile>
-    <NoWarn>42016,41999,42017,42018,42019,42032,42036,42020,42021,42022</NoWarn>
-  </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
-    <DebugType>pdbonly</DebugType>
-    <DefineDebug>false</DefineDebug>
-    <DefineTrace>true</DefineTrace>
-    <Optimize>true</Optimize>
-    <OutputPath>bin\</OutputPath>
-    <DocumentationFile>GumballGH.xml</DocumentationFile>
-    <NoWarn>42016,41999,42017,42018,42019,42032,42036,42020,42021,42022</NoWarn>
-  </PropertyGroup>
-  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
     <OptionExplicit>On</OptionExplicit>
-  </PropertyGroup>
-  <PropertyGroup>
-    <OptionCompare>Binary</OptionCompare>
-  </PropertyGroup>
-  <PropertyGroup>
     <OptionStrict>Off</OptionStrict>
-  </PropertyGroup>
-  <PropertyGroup>
     <OptionInfer>On</OptionInfer>
+    <OptionCompare>Binary</OptionCompare>
+    <MyType>Empty</MyType>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <NoWarn>42016,41999,42017,42018,42019,42032,42036,42020,42021,42022,NU1701,NETSDK1086</NoWarn>
+    <Version>1.0.1</Version>
+    <Title>GumballGH</Title>
+    <Authors>GIA</Authors>
+    <Company>GIA</Company>
+    <Description>Grasshopper gumball for geometry (Rhino 8 / .NET 7, Windows and macOS)</Description>
+    <!-- Matches user's Grasshopper User Libraries ▸ GIA on this machine (Rhino 8); Windows uses Roaming Grasshopper Libraries ▸ GIA. -->
+    <GiaGrasshopperLibraries Condition="'$(OS)' == 'Windows_NT'">$(USERPROFILE)\AppData\Roaming\Grasshopper\Libraries\GIA</GiaGrasshopperLibraries>
+    <GiaGrasshopperLibraries Condition="'$(OS)' != 'Windows_NT'">$(HOME)/Library/Application Support/McNeel/Rhinoceros/8.0/Plug-ins/Grasshopper (b45a29b1-4343-4035-989e-044e8580d9cf)/Libraries/GIA</GiaGrasshopperLibraries>
   </PropertyGroup>
+
+  <!-- Rhino / Grasshopper (Rhino 8). Pin to match your installed Rhino 8 service release if needed.
+       Do NOT ship dependency DLLs next to the .gha in Grasshopper Libraries — it breaks binding for all plugins. -->
   <ItemGroup>
-    <Reference Include="System" />
-    <Reference Include="System.Core" />
-    <Reference Include="System.Drawing" />
-    <Reference Include="System.Windows.Forms" />
-    <Reference Include="Grasshopper">
-      <SpecificVersion>False</SpecificVersion>
-      <HintPath>C:\Program Files\Common Files\McNeel\Rhinoceros\5.0\Plug-ins\Grasshopper (b45a29b1-4343-4035-989e-044e8580d9cf)\0.9.76.0\Grasshopper.dll</HintPath>
-      <Private>False</Private>
-    </Reference>
-    <Reference Include="GH_IO">
-      <SpecificVersion>False</SpecificVersion>
-      <HintPath>C:\Program Files\Common Files\McNeel\Rhinoceros\5.0\Plug-ins\Grasshopper (b45a29b1-4343-4035-989e-044e8580d9cf)\0.9.76.0\GH_IO.dll</HintPath>
-      <Private>False</Private>
-    </Reference>
-    <Reference Include="RhinoCommon">
-      <SpecificVersion>False</SpecificVersion>
-      <HintPath>C:\Program Files\Rhinoceros 5 (64-bit)\System\RhinoCommon.dll</HintPath>
-      <Private>False</Private>
-    </Reference>
+    <PackageReference Include="Grasshopper" Version="8.30.26103.11001" ExcludeAssets="runtime" />
   </ItemGroup>
+
+  <!-- WinForms on net7 macOS / Windows (McNeel Grasshopper template pattern) -->
   <ItemGroup>
-    <Import Include="Microsoft.VisualBasic" />
-    <Import Include="System" />
-    <Import Include="System.Collections" />
-    <Import Include="System.Collections.Generic" />
-    <Import Include="System.Diagnostics" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net48" Version="1.0.3" ExcludeAssets="all" GeneratePathProperty="true" />
+    <Reference Include="$(PkgMicrosoft_NETFramework_ReferenceAssemblies_net48)\build\.NETFramework\v4.8\System.Windows.Forms.dll" Private="False" />
+    <PackageReference Include="System.Drawing.Common" Version="8.0.0" ExcludeAssets="runtime" />
   </ItemGroup>
+
   <ItemGroup>
-    <Compile Include="GumballGHInfo.vb" />
-    <Compile Include="Gumball.vb" />
-    <Compile Include="My Project\AssemblyInfo.vb" />
-    <Compile Include="My Project\Application.Designer.vb">
-      <AutoGen>True</AutoGen>
-      <DependentUpon>Application.myapp</DependentUpon>
-    </Compile>
-    <Compile Include="My Project\Resources.Designer.vb">
-      <AutoGen>True</AutoGen>
-      <DesignTime>True</DesignTime>
-      <DependentUpon>Resources.resx</DependentUpon>
-    </Compile>
-    <Compile Include="My Project\Settings.Designer.vb">
-      <AutoGen>True</AutoGen>
-      <DependentUpon>Settings.settings</DependentUpon>
-      <DesignTimeSharedInput>True</DesignTimeSharedInput>
-    </Compile>
-  </ItemGroup>
-  <ItemGroup>
-    <EmbeddedResource Include="My Project\Resources.resx">
-      <Generator>VbMyResourcesResXFileCodeGenerator</Generator>
-      <LastGenOutput>Resources.Designer.vb</LastGenOutput>
-      <CustomToolNamespace>My.Resources</CustomToolNamespace>
-      <SubType>Designer</SubType>
+    <EmbeddedResource Include="Resources\GumballIcon.png">
+      <LogicalName>GumballGH.GumballIcon.png</LogicalName>
     </EmbeddedResource>
+    <EmbeddedResource Remove="My Project\Resources.resx" />
+    <Compile Remove="My Project\Resources.Designer.vb" />
   </ItemGroup>
+
   <ItemGroup>
-    <None Include="My Project\Application.myapp">
-      <Generator>MyApplicationCodeGenerator</Generator>
-      <LastGenOutput>Application.Designer.vb</LastGenOutput>
-    </None>
-    <None Include="My Project\Settings.settings">
-      <Generator>SettingsSingleFileGenerator</Generator>
-      <CustomToolNamespace>My</CustomToolNamespace>
-      <LastGenOutput>Settings.Designer.vb</LastGenOutput>
-    </None>
+    <Compile Remove="My Project\Settings.Designer.vb" />
+    <None Include="My Project\Settings.settings" />
   </ItemGroup>
+
   <ItemGroup>
-    <None Include="Resources\GumballIcon.png" />
+    <None Include="My Project\Application.myapp" />
   </ItemGroup>
-  <Import Project="$(MSBuildToolsPath)\Microsoft.VisualBasic.targets" />
-  <!-- To modify your build process, add your task inside one of the targets below and uncomment it. 
-       Other similar extension points exist, see Microsoft.Common.targets.
-  <Target Name="BeforeBuild">
+
+  <!-- VB emits a .dll assembly; Grasshopper expects a .gha extension (same PE file). -->
+  <Target Name="CopyGhaPlugin" AfterTargets="Build">
+    <Copy SourceFiles="$(TargetDir)$(TargetFileName)" DestinationFiles="$(TargetDir)$(AssemblyName).gha" SkipUnchangedFiles="false" />
   </Target>
-  <Target Name="AfterBuild">
+
+  <Target Name="DeployGhaToGiaGrasshopperLibraries" AfterTargets="CopyGhaPlugin">
+    <MakeDir Directories="$(GiaGrasshopperLibraries)" />
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName).gha" DestinationFolder="$(GiaGrasshopperLibraries)" SkipUnchangedFiles="false" />
+    <Message Importance="high" Text="Copied $(AssemblyName).gha to $(GiaGrasshopperLibraries)" />
   </Target>
-  -->
-  <PropertyGroup>
-    <PostBuildEvent>Copy "$(TargetPath)" "$(TargetDir)$(ProjectName).gha"
-Erase "$(TargetPath)"</PostBuildEvent>
-  </PropertyGroup>
-  <PropertyGroup>
-    <FallbackCulture>en-US</FallbackCulture>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug64|AnyCPU'">
-    <StartProgram>C:\Program Files\Rhinoceros 5 (64-bit)\System\Rhino.exe</StartProgram>
-    <StartArguments>
-    </StartArguments>
-    <StartAction>Program</StartAction>
-  </PropertyGroup>
+
 </Project>

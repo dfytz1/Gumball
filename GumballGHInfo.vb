@@ -28,12 +28,12 @@ Public Class GumballGHInfo
 
     Public Overrides ReadOnly Property AuthorName As String
         Get
-            Return "Daniel Abalde"
+            Return "GIA"
         End Get
     End Property
     Public Overrides ReadOnly Property AuthorContact As String
         Get
-            Return "dga_3@hotmail.com"
+            Return String.Empty
         End Get
     End Property
 End Class
