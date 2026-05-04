@@ -1441,11 +1441,54 @@ Public Class GhGumball
 
     ''' <summary>If the user dismisses numeric input with an empty value, clear pick state.</summary>
     Friend Sub CancelPendingNumericInput()
+        Dim ix As Integer = Index
         ValueString = String.Empty
         Index = -1
         SaveUndo = False
         _gripExceededDragThreshold = False
+        If ix >= 0 AndAlso ix < Count Then
+            Try
+                Dim c As Rhino.UI.Gumball.GumballDisplayConduit = Conduits(ix)
+                c.PickResult.SetToDefault()
+                c.SetBaseGumball(Gumballs(ix), Appearances(ix))
+                c.Enabled = True
+            Catch
+            End Try
+            Try
+                Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
+            Catch
+            End Try
+        End If
     End Sub
+
+    ''' <summary>Solves one constrained gumball update for viewport coordinates — updates rotate/translate/scale grip graphics (Rhino “active grip” look) relative to plane.</summary>
+    Private Function TryViewportUpdateGumball(ix As Integer, view As Rhino.Display.RhinoView, viewportPt As Drawing.Point) As Boolean
+        If ix < 0 OrElse ix >= Count Then Return False
+        If view Is Nothing Then Return False
+        Dim c As Rhino.UI.Gumball.GumballDisplayConduit = Conduits(ix)
+        If c.PickResult.Mode = Rhino.UI.Gumball.GumballMode.None Then Return False
+        c.CheckShiftAndControlKeys()
+        Dim wordline As Line = Nothing
+        If Not view.MainViewport.GetFrustumLine(CDbl(viewportPt.X), CDbl(viewportPt.Y), wordline) Then
+            wordline = Line.Unset
+        End If
+        Dim cplane As Plane = view.MainViewport.GetConstructionPlane().Plane()
+        Dim lp As Double = Nothing
+        Rhino.Geometry.Intersect.Intersection.LinePlane(wordline, cplane, lp)
+        Dim dragPoint As Point3d = wordline.PointAt(lp)
+        If Rhino.ApplicationSettings.ModelAidSettings.GridSnap Then
+            Dim m As Rhino.UI.Gumball.GumballMode = c.PickResult.Mode
+            If (m = Rhino.UI.Gumball.GumballMode.TranslateFree OrElse m = Rhino.UI.Gumball.GumballMode.TranslateX OrElse
+                    m = Rhino.UI.Gumball.GumballMode.TranslateY OrElse m = Rhino.UI.Gumball.GumballMode.TranslateZ OrElse
+                    m = Rhino.UI.Gumball.GumballMode.TranslateXY OrElse m = Rhino.UI.Gumball.GumballMode.TranslateYZ OrElse
+                    m = Rhino.UI.Gumball.GumballMode.TranslateZX) Then
+                Dim snap As Point3d = New Point3d(CInt(dragPoint.X), CInt(dragPoint.Y), CInt(dragPoint.Z))
+                wordline.Transform(Transform.Translation(New Vector3d(snap - dragPoint)))
+                dragPoint = snap
+            End If
+        End If
+        Return c.UpdateGumball(dragPoint, wordline)
+    End Function
 
     Protected Overrides Sub OnMouseDown(e As Rhino.UI.MouseCallbackEventArgs)
         MyBase.OnMouseDown(e)
@@ -1567,26 +1610,7 @@ Public Class GhGumball
             _gripExceededDragThreshold = True
         End If
 
-        Conduits(Index).CheckShiftAndControlKeys()
-        Dim wordline As Line = Nothing
-        If Not (e.View.MainViewport.GetFrustumLine(CDbl(e.ViewportPoint.X), CDbl(e.ViewportPoint.Y), wordline)) Then
-            wordline = Line.Unset
-        End If
-        Dim cplane As Plane = e.View.MainViewport.GetConstructionPlane().Plane()
-        Dim lp As Double = Nothing
-        Rhino.Geometry.Intersect.Intersection.LinePlane(wordline, cplane, lp)
-        Dim dragPoint As Point3d = wordline.PointAt(lp)
-        If (Rhino.ApplicationSettings.ModelAidSettings.GridSnap) Then
-            If (Conduits(Index).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateFree Or Conduits(Index).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateX Or
-                    Conduits(Index).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateY Or Conduits(Index).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateZ Or
-                    Conduits(Index).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateXY Or Conduits(Index).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateYZ Or
-                    Conduits(Index).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateZX) Then
-                Dim snap As Point3d = New Point3d(CInt(dragPoint.X), CInt(dragPoint.Y), CInt(dragPoint.Z))
-                wordline.Transform(Transform.Translation(New Vector3d(snap - dragPoint)))
-                dragPoint = snap
-            End If
-        End If
-        If Not (Conduits(Index).UpdateGumball(dragPoint, wordline)) Then Exit Sub
+        If Not TryViewportUpdateGumball(Index, e.View, e.ViewportPoint) Then Exit Sub
         Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
 
         If Component IsNot Nothing AndAlso Component.LiveTransformsWhileDragging Then
@@ -1614,10 +1638,16 @@ Public Class GhGumball
 
         If (Index = -1) Or (Index >= Count) Or (ValueString <> String.Empty) Then Exit Sub
 
-        ' Click without drag: open numeric entry (Rhino gumball–style). Avoids UpdateGumball on down/up only, which left the conduit half-active.
+        ' Click without drag: prime conduit once at pick so rotate/translate grips show Rhino active-handle graphics; then open numeric float.
         If Not _gripExceededDragThreshold Then
             _dragPreTransformCaptured = False
             SaveUndo = False
+            Try
+                If e.View IsNot Nothing AndAlso TryViewportUpdateGumball(Index, e.View, _gripDownViewport) Then
+                    Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
+                End If
+            Catch
+            End Try
             Dim screenPt As Drawing.Point = Control.MousePosition
             TextBox = New FormTextBox(screenPt, Me)
             e.Cancel = True
