@@ -9,6 +9,7 @@ Imports System.Reflection
 Imports System.Windows.Forms
 Imports Grasshopper
 Imports Grasshopper.Kernel
+Imports Grasshopper.GUI
 Imports GH_IO.Serialization
 Imports Rhino.Display
 Imports Rhino.Geometry
@@ -1104,7 +1105,12 @@ Public Class GhGumball
             comp.ModeValue(1) = att1.GetInt32("attmode", 1)
             comp.ModeValue(2) = att1.GetBoolean("aligntogeometry", 2)
             comp.PreserveTransformsOnGeometryChange = att1.GetBoolean("preservexf", 3)
-            comp.ProximityCache = att1.GetBoolean("proximitycache", 4)
+            Dim proxStored As Boolean
+            If att1.TryGetBoolean("proximitycache", 4, proxStored) Then
+                comp.ProximityCache = proxStored
+            Else
+                comp.ProximityCache = False
+            End If
             Dim lvStored As Boolean
             If att1.TryGetBoolean("livetransform", 5, lvStored) Then
                 comp.LiveTransformsWhileDragging = lvStored
@@ -2097,7 +2103,12 @@ Public Class GhGumball
             Component.ModeValue(1) = att1.GetInt32("attmode", 1)
             Component.ModeValue(2) = att1.GetBoolean("aligntogeometry", 2)
             Component.PreserveTransformsOnGeometryChange = att1.GetBoolean("preservexf", 3)
-            Component.ProximityCache = att1.GetBoolean("proximitycache", 4)
+            Dim proxStored2 As Boolean
+            If att1.TryGetBoolean("proximitycache", 4, proxStored2) Then
+                Component.ProximityCache = proxStored2
+            Else
+                Component.ProximityCache = False
+            End If
             Dim lvStored2 As Boolean
             If att1.TryGetBoolean("livetransform", 5, lvStored2) Then
                 Component.LiveTransformsWhileDragging = lvStored2
@@ -2240,6 +2251,7 @@ Public Class FormAttributes
         Component = Comp
         _activeInstance = Me
         InitializeComponent()
+        PositionAttributesFormOnGrasshopperHost()
         GumballNumericBackdropMouse.Instance.EnsureEnabled()
         _suppressBackdropDismissUntil = Environment.TickCount + 1200
         Dim ownerForm As Form = TryCast(Grasshopper.Instances.DocumentEditor, Form)
@@ -2248,6 +2260,27 @@ Public Class FormAttributes
         Else
             Show()
         End If
+    End Sub
+
+    ''' <summary>Anchor the Attributes window to the Grasshopper editor so it stacks above Rhino reliably (macOS/WPF hosts).</summary>
+    Private Sub PositionAttributesFormOnGrasshopperHost()
+        Try
+            Dim host As Control = TryCast(Grasshopper.Instances.DocumentEditor, Control)
+            If host Is Nothing Then
+                Me.StartPosition = FormStartPosition.CenterScreen
+                Return
+            End If
+            Me.StartPosition = FormStartPosition.Manual
+            Dim client As Drawing.Rectangle = host.RectangleToScreen(New Drawing.Rectangle(0, 0, host.ClientSize.Width, host.ClientSize.Height))
+            Dim sr As Drawing.Rectangle = Screen.FromRectangle(client).WorkingArea
+            Dim lx As Integer = client.Left + client.Width \ 2 - Me.Width \ 2
+            Dim ly As Integer = client.Top + Math.Min(CInt(client.Height / 10.0F), 140)
+            lx = Math.Max(sr.Left + 10, Math.Min(lx, sr.Right - Me.Width - 10))
+            ly = Math.Max(sr.Top + 10, Math.Min(ly, sr.Bottom - Me.Height - 10))
+            Me.Location = New Drawing.Point(lx, ly)
+        Catch
+            Me.StartPosition = FormStartPosition.CenterScreen
+        End Try
     End Sub
 
     Private Shared Sub CloseStaleAttributesFloat()
