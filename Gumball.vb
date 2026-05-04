@@ -42,7 +42,7 @@ Public Class GumballComp
     Inherits GH_Component
 
     Public Sub New()
-        MyBase.New("Gumball ", "Gumball", "Gumball for Grasshopper geometry", "Params", "Util")
+        MyBase.New("Gumball ", "Gumball", "Viewport gumball: Shift while scaling = uniform XYZ (like Rhino); Ctrl+click grip (⌘+click on Mac) = numeric entry.", "Params", "Util")
     End Sub
 
 #Region "Overrides"
@@ -1465,7 +1465,7 @@ Public Class GhGumball
                 Index = i
                 SaveUndo = True
                 e.Cancel = True
-                Dim ctrlNumericPick As Boolean = ((Control.ModifierKeys And Keys.Control) <> Keys.None)
+                Dim ctrlNumericPick As Boolean = e.CtrlKeyDown OrElse ((Control.ModifierKeys And Keys.Control) <> Keys.None)
                 If (ctrlNumericPick) Then
                     Dim screenPt As Drawing.Point = Control.MousePosition
                     TextBox = New FormTextBox(screenPt, Me)
@@ -1555,7 +1555,7 @@ Public Class GhGumball
         If (Index = -1) Or (Index >= Count) Then Exit Sub
 
         If (Conduits(Index).PickResult.Mode = Rhino.UI.Gumball.GumballMode.None) Then Exit Sub
-        'Conduits(Index).CheckShiftAndControlKeys()
+        Conduits(Index).CheckShiftAndControlKeys()
         Dim wordline As Line = Nothing
         If Not (e.View.MainViewport.GetFrustumLine(CDbl(e.ViewportPoint.X), CDbl(e.ViewportPoint.Y), wordline)) Then
             wordline = Line.Unset
@@ -1594,7 +1594,7 @@ Public Class GhGumball
 
         MyBase.OnMouseUp(e)
 
-        ' Ctrl+pick opens the numeric form on MouseDown; MouseUp would otherwise clear Index before Enter is pressed.
+        ' Ctrl/⌘+pick opens the numeric form on MouseDown; MouseUp would otherwise clear Index before Enter is pressed.
         If (TextBox IsNot Nothing) Then
             e.Cancel = True
             Exit Sub

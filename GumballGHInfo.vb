@@ -16,8 +16,7 @@ Public Class GumballGHInfo
     End Property
     Public Overrides ReadOnly Property Description As String
         Get
-            'Return a short string describing the purpose of this GHA library.
-            Return ""
+            Return "Viewport gumball: Shift on scale grips = uniform XYZ; Ctrl or ⌘+click grip = numeric entry; compound transforms and preserve modes."
         End Get
     End Property
     Public Overrides ReadOnly Property Id As System.Guid

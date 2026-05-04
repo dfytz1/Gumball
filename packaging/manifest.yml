@@ -1,10 +1,11 @@
 name: GhGumball
-version: 1.0.4
+version: 1.0.5
 authors:
   - GIA
 description: >
-  Interactive viewport gumball for Grasshopper geometry: per-branch transforms with undo‑friendly compound
-  transform outputs, optional preservation when upstream data changes by index or bounding‑box proximity, and numeric entry (Rhino 8).
+  Interactive viewport gumball for Grasshopper geometry: per-branch transforms with undo‑friendly compound transform outputs,
+  optional preservation when upstream data changes by index or bounding‑box proximity,
+  Ctrl+click grip (⌘+click on Mac) for typed numeric transforms, and Shift while dragging a scale grip for uniform XYZ scale like Rhino’s gumball (Rhino 8).
 url: "https://github.com/dfytz1/Gumball"
 icon: icon.png
 keywords:

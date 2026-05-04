@@ -15,14 +15,11 @@
     <LangVersion>latest</LangVersion>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <NoWarn>42016,41999,42017,42018,42019,42032,42036,42020,42021,42022,NU1701,NETSDK1086</NoWarn>
-    <Version>1.0.4</Version>
+    <Version>1.0.5</Version>
     <Title>GumballGH</Title>
     <Authors>GIA</Authors>
     <Company>GIA</Company>
-    <Description>Viewport gumball for Grasshopper geometry: interactive transforms, compound transforms, preserve modes (Rhino 8 / .NET 8).</Description>
-    <!-- Matches user's Grasshopper User Libraries ▸ GIA on this machine (Rhino 8); Windows uses Roaming Grasshopper Libraries ▸ GIA. -->
-    <GiaGrasshopperLibraries Condition="'$(OS)' == 'Windows_NT'">$(USERPROFILE)\AppData\Roaming\Grasshopper\Libraries\GIA</GiaGrasshopperLibraries>
-    <GiaGrasshopperLibraries Condition="'$(OS)' != 'Windows_NT'">$(HOME)/Library/Application Support/McNeel/Rhinoceros/8.0/Plug-ins/Grasshopper (b45a29b1-4343-4035-989e-044e8580d9cf)/Libraries/GIA</GiaGrasshopperLibraries>
+    <Description>Viewport gumball for Grasshopper: Shift+scale = uniform XYZ (Rhino-style); Ctrl/⌘+click grip for numeric entry; compound transforms and preserve modes (Rhino 8 / .NET 8).</Description>
   </PropertyGroup>
 
   <!-- Rhino / Grasshopper (Rhino 8). Pin to match your installed Rhino 8 service release if needed.
@@ -58,12 +55,6 @@
   <!-- VB emits a .dll assembly; Grasshopper expects a .gha extension (same PE file). -->
   <Target Name="CopyGhaPlugin" AfterTargets="Build">
     <Copy SourceFiles="$(TargetDir)$(TargetFileName)" DestinationFiles="$(TargetDir)$(AssemblyName).gha" SkipUnchangedFiles="false" />
-  </Target>
-
-  <Target Name="DeployGhaToGiaGrasshopperLibraries" AfterTargets="CopyGhaPlugin">
-    <MakeDir Directories="$(GiaGrasshopperLibraries)" />
-    <Copy SourceFiles="$(TargetDir)$(AssemblyName).gha" DestinationFolder="$(GiaGrasshopperLibraries)" SkipUnchangedFiles="false" />
-    <Message Importance="high" Text="Copied $(AssemblyName).gha to $(GiaGrasshopperLibraries)" />
   </Target>
 
 </Project>
