@@ -15,11 +15,11 @@
     <LangVersion>latest</LangVersion>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <NoWarn>42016,41999,42017,42018,42019,42032,42036,42020,42021,42022,NU1701,NETSDK1086</NoWarn>
-    <Version>1.0.5</Version>
+    <Version>1.0.6</Version>
     <Title>GumballGH</Title>
     <Authors>GIA</Authors>
     <Company>GIA</Company>
-    <Description>Viewport gumball for Grasshopper: Shift+scale = uniform XYZ (Rhino-style); Ctrl/⌘+click grip for numeric entry; compound transforms and preserve modes (Rhino 8 / .NET 8).</Description>
+    <Description>Viewport gumball for Grasshopper: Shift+scale = uniform XYZ (Rhino-style); click a grip without dragging for numeric entry; compound transforms and preserve modes (Rhino 8 / .NET 8).</Description>
   </PropertyGroup>
 
   <!-- Rhino / Grasshopper (Rhino 8). Pin to match your installed Rhino 8 service release if needed.

@@ -16,7 +16,7 @@ Public Class GumballGHInfo
     End Property
     Public Overrides ReadOnly Property Description As String
         Get
-            Return "Viewport gumball: Shift on scale grips = uniform XYZ; Ctrl or ⌘+click grip = numeric entry; compound transforms and preserve modes."
+            Return "Viewport gumball: Shift on scale grips = uniform XYZ; click a grip (no drag) for numeric entry; compound transforms and preserve modes."
         End Get
     End Property
     Public Overrides ReadOnly Property Id As System.Guid

@@ -42,7 +42,7 @@ Public Class GumballComp
     Inherits GH_Component
 
     Public Sub New()
-        MyBase.New("Gumball ", "Gumball", "Viewport gumball: Shift while scaling = uniform XYZ (like Rhino); Ctrl+click grip (⌘+click on Mac) = numeric entry.", "Params", "Util")
+        MyBase.New("Gumball ", "Gumball", "Viewport gumball: Shift while scaling = uniform XYZ (like Rhino); click a grip (no drag) for numeric entry.", "Params", "Util")
     End Sub
 
 #Region "Overrides"
@@ -1426,6 +1426,8 @@ Public Class GhGumball
     Private SaveUndo As Boolean = False
     Private TextBox As FormTextBox = Nothing
     Public ValueString As String = String.Empty
+    Private _gripDownViewport As Drawing.Point
+    Private _gripExceededDragThreshold As Boolean
 
     ''' <summary>If the numeric float is orphaned (GhGumball MouseDown did not run), drop the WinForms reference only — does not cancel gumball Index.</summary>
     Friend Sub ForgetFloatingTextBox()
@@ -1442,6 +1444,7 @@ Public Class GhGumball
         ValueString = String.Empty
         Index = -1
         SaveUndo = False
+        _gripExceededDragThreshold = False
     End Sub
 
     Protected Overrides Sub OnMouseDown(e As Rhino.UI.MouseCallbackEventArgs)
@@ -1465,17 +1468,13 @@ Public Class GhGumball
                 Index = i
                 SaveUndo = True
                 e.Cancel = True
-                Dim ctrlNumericPick As Boolean = e.CtrlKeyDown OrElse ((Control.ModifierKeys And Keys.Control) <> Keys.None)
-                If (ctrlNumericPick) Then
-                    Dim screenPt As Drawing.Point = Control.MousePosition
-                    TextBox = New FormTextBox(screenPt, Me)
-                Else
-                    PreviewGripDelta = Transform.Identity
-                    PreviewGripSlot = -1
-                    _dragPreTransformSnapshot = Conduits(i).PreTransform
-                    _dragPreTransformCaptured = True
-                    EnsureRhinoEscapeHandler()
-                End If
+                _gripDownViewport = e.ViewportPoint
+                _gripExceededDragThreshold = False
+                PreviewGripDelta = Transform.Identity
+                PreviewGripSlot = -1
+                _dragPreTransformSnapshot = Conduits(i).PreTransform
+                _dragPreTransformCaptured = True
+                EnsureRhinoEscapeHandler()
                 Exit For
             End If
         Next
@@ -1522,6 +1521,7 @@ Public Class GhGumball
             End Try
         End If
         _dragPreTransformCaptured = False
+        _gripExceededDragThreshold = False
         Index = -1
         Me.Enabled = True
 
@@ -1555,6 +1555,18 @@ Public Class GhGumball
         If (Index = -1) Or (Index >= Count) Then Exit Sub
 
         If (Conduits(Index).PickResult.Mode = Rhino.UI.Gumball.GumballMode.None) Then Exit Sub
+
+        Dim ddx As Double = CDbl(e.ViewportPoint.X) - CDbl(_gripDownViewport.X)
+        Dim ddy As Double = CDbl(e.ViewportPoint.Y) - CDbl(_gripDownViewport.Y)
+        If Not _gripExceededDragThreshold Then
+            Const clickSlopPx As Double = 4.0
+            If (ddx * ddx + ddy * ddy) < (clickSlopPx * clickSlopPx) Then
+                e.Cancel = True
+                Exit Sub
+            End If
+            _gripExceededDragThreshold = True
+        End If
+
         Conduits(Index).CheckShiftAndControlKeys()
         Dim wordline As Line = Nothing
         If Not (e.View.MainViewport.GetFrustumLine(CDbl(e.ViewportPoint.X), CDbl(e.ViewportPoint.Y), wordline)) Then
@@ -1594,13 +1606,23 @@ Public Class GhGumball
 
         MyBase.OnMouseUp(e)
 
-        ' Ctrl/⌘+pick opens the numeric form on MouseDown; MouseUp would otherwise clear Index before Enter is pressed.
+        ' Numeric float keeps Index until Enter/dismiss; avoid clearing pick state here.
         If (TextBox IsNot Nothing) Then
             e.Cancel = True
             Exit Sub
         End If
 
         If (Index = -1) Or (Index >= Count) Or (ValueString <> String.Empty) Then Exit Sub
+
+        ' Click without drag: open numeric entry (Rhino gumball–style). Avoids UpdateGumball on down/up only, which left the conduit half-active.
+        If Not _gripExceededDragThreshold Then
+            _dragPreTransformCaptured = False
+            SaveUndo = False
+            Dim screenPt As Drawing.Point = Control.MousePosition
+            TextBox = New FormTextBox(screenPt, Me)
+            e.Cancel = True
+            Exit Sub
+        End If
 
         _dragPreTransformCaptured = False
 
@@ -1617,12 +1639,21 @@ Public Class GhGumball
 
         If finalXform <> Transform.Identity Then
             CommitGripTransform(gripIdx, finalXform)
+        Else
+            Try
+                Dim c As Rhino.UI.Gumball.GumballDisplayConduit = Conduits(gripIdx)
+                c.PickResult.SetToDefault()
+                c.SetBaseGumball(Gumballs(gripIdx), Appearances(gripIdx))
+                c.Enabled = True
+            Catch
+            End Try
         End If
 
         If Component.LiveTransformsWhileDragging OrElse (finalXform <> Transform.Identity) Then
             Component.ExpireSolution(True)
         End If
 
+        _gripExceededDragThreshold = False
         Index = -1
         e.Cancel = True
     End Sub
@@ -1645,6 +1676,7 @@ Public Class GhGumball
                 Rhino.RhinoApp.WriteLine("Invalid value. Only numerical values are allowed.")
                 Index = -1
                 ValueString = String.Empty
+                _gripExceededDragThreshold = False
                 Exit Sub
             End Try
 
@@ -1720,6 +1752,7 @@ Public Class GhGumball
                 Case Else
                     Index = -1
                     ValueString = String.Empty
+                    _gripExceededDragThreshold = False
                     Exit Sub
 
             End Select
@@ -1756,6 +1789,7 @@ Public Class GhGumball
             End If
             Index = -1
             ValueString = String.Empty
+            _gripExceededDragThreshold = False
     End Sub
 #End Region
 
@@ -2730,7 +2764,7 @@ Public Class FormTextBox
     Public GB As GhGumball
     Private _committing As Boolean
     Private _outsideDismissReady As Boolean
-    ''' <summary>Rhino and GH handlers ignore dismiss briefly so the opening ctrl+pick does not close the fresh float.</summary>
+    ''' <summary>Rhino and GH handlers ignore dismiss briefly so the opening click-release does not close the fresh float.</summary>
     Private _suppressBackdropDismissUntil As Integer
     Private _hookedCanvas As GH_Canvas
 
