@@ -907,17 +907,35 @@ Public Class GumballComp
 #Region "Write/Read"
 
     Public Overrides Function Write(ByVal writer As GH_IO.Serialization.GH_IWriter) As Boolean
-        If (MyGumball IsNot Nothing) Then MyGumball.GumballWriter(writer)
+        If MyGumball IsNot Nothing AndAlso MyGumball.IsRuntimeStateCompleteForSerialization() Then
+            MyGumball.GumballWriter(writer)
+        End If
         Return MyBase.Write(writer)
     End Function
 
     Public Overrides Function Read(ByVal reader As GH_IO.Serialization.GH_IReader) As Boolean
 
-        If (MyGumball Is Nothing) Then
-            MyGumball = New GhGumball(reader, Me)
+        If Not GhGumball.GhClipboardRootLooksComplete(reader) Then
+            Return MyBase.Read(reader)
+        End If
+
+        If MyGumball Is Nothing Then
+            Dim candidate As New GhGumball(reader, Me)
+            If candidate.IsRuntimeStateCompleteForSerialization() Then
+                MyGumball = candidate
+            Else
+                candidate.ClearAfterFailedOrEmptyDeserialize()
+            End If
         Else
             MyGumball.HideGumballs()
-            MyGumball.GumballReader(reader)
+            If Not MyGumball.GumballReader(reader) Then
+                Dim d As GhGumball = MyGumball
+                MyGumball = Nothing
+                Try
+                    d.Dispose()
+                Catch
+                End Try
+            End If
         End If
 
         Return MyBase.Read(reader)
@@ -1009,6 +1027,80 @@ Public Class GhGumball
             End Try
         Next
         SnapTranslateTargets = Nothing
+    End Sub
+
+    ''' <summary>Gumball is safe to clipboard-serialize only when SolveInstance built all parallel arrays consistently.</summary>
+    Friend Function IsRuntimeStateCompleteForSerialization() As Boolean
+        If Count <= 0 Then Return False
+        If Geometry Is Nothing OrElse Xform Is Nothing OrElse Gumballs Is Nothing OrElse Conduits Is Nothing OrElse Appearances Is Nothing Then Return False
+        If Geometry.Length <> Count OrElse Xform.Length <> Count OrElse Gumballs.Length <> Count OrElse Conduits.Length <> Count OrElse Appearances.Length <> Count Then Return False
+        Return True
+    End Function
+
+    Friend Shared Function GhClipboardRootLooksComplete(reader As GH_IO.Serialization.GH_IReader) As Boolean
+        If reader Is Nothing OrElse Not reader.ChunkExists("gbroot") Then Return False
+        Try
+            Dim root As GH_IO.Serialization.GH_IReader = reader.FindChunk("gbroot")
+            If root Is Nothing Then Return False
+            Dim data As GH_IO.Serialization.GH_IReader = root.FindChunk("gbdata", 0)
+            If data Is Nothing Then Return False
+            Dim countgeo As GH_IO.Serialization.GH_IReader = data.FindChunk("countgeo", 0)
+            If countgeo Is Nothing Then Return False
+            Dim ct As Integer = countgeo.GetInt32("count", 0)
+            If ct <= 0 Then Return False
+            Dim geoCh As GH_IO.Serialization.GH_IReader = data.FindChunk("geometry", 1)
+            Dim xfCh As GH_IO.Serialization.GH_IReader = data.FindChunk("transform", 2)
+            Dim gumCh As GH_IO.Serialization.GH_IReader = data.FindChunk("gumball", 3)
+            If geoCh Is Nothing OrElse xfCh Is Nothing OrElse gumCh Is Nothing Then Return False
+            Dim att As GH_IO.Serialization.GH_IReader = root.FindChunk("gbattributes", 1)
+            If att Is Nothing Then Return False
+            Dim att0 As GH_IO.Serialization.GH_Chunk = att.FindChunk("gumballattributes_values", 0)
+            Dim att1 As GH_IO.Serialization.GH_Chunk = att.FindChunk("gumballattributes_modes", 1)
+            If att0 Is Nothing OrElse att1 Is Nothing Then Return False
+            Return True
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Friend Sub ClearAfterFailedOrEmptyDeserialize()
+        If Conduits IsNot Nothing Then
+            For ix As Integer = 0 To Conduits.Length - 1
+                Try
+                    If Conduits(ix) IsNot Nothing Then
+                        Conduits(ix).Enabled = False
+                        Conduits(ix).Dispose()
+                    End If
+                Catch
+                End Try
+            Next
+        End If
+        If Gumballs IsNot Nothing Then
+            For ix As Integer = 0 To Gumballs.Length - 1
+                Try
+                    If Gumballs(ix) IsNot Nothing Then Gumballs(ix).Dispose()
+                Catch
+                End Try
+            Next
+        End If
+        If Geometry IsNot Nothing Then
+            For ix As Integer = 0 To Geometry.Length - 1
+                Try
+                    Dim g As GeometryBase = Geometry(ix)
+                    If g IsNot Nothing Then g.Dispose()
+                Catch
+                End Try
+            Next
+        End If
+        Count = 0
+        Geometry = Nothing
+        Xform = Nothing
+        Gumballs = Nothing
+        Conduits = Nothing
+        Appearances = Nothing
+        GeometrytoAlign = Nothing
+        HasAlignAxisReferencePlane = False
+        AlignAxisReferencePlane = Plane.Unset
     End Sub
 
 #Region "New/Show/Hide/Dispose"
@@ -1234,7 +1326,15 @@ Public Class GhGumball
 
     Sub New(Reader As GH_IO.Serialization.GH_IReader, comp As GumballComp)
 
-        If Not (Reader.ChunkExists("gbroot")) Then Exit Sub
+        Component = comp
+        Count = 0
+        Geometry = Nothing
+        Xform = Nothing
+        Gumballs = Nothing
+        Conduits = Nothing
+        Appearances = Nothing
+
+        If Not GhClipboardRootLooksComplete(Reader) Then Exit Sub
 
         Try
             Dim i As New Integer
@@ -1395,12 +1495,14 @@ Public Class GhGumball
 
         Catch ex As Exception
             Rhino.RhinoApp.WriteLine("NEW_GB; " & ex.ToString())
+            ClearAfterFailedOrEmptyDeserialize()
         End Try
     End Sub
     '
     '
     Public Sub ShowGumballs()
-        For i As Int32 = 0 To Count - 1
+        If Conduits Is Nothing Then Return
+        For i As Int32 = 0 To Conduits.Length - 1
             Conduits(i).Enabled = True
         Next
         Me.Enabled = True
@@ -1408,7 +1510,8 @@ Public Class GhGumball
     End Sub
 
     Public Sub HideGumballs()
-        For i As Int32 = 0 To Count - 1
+        If Conduits Is Nothing Then Return
+        For i As Int32 = 0 To Conduits.Length - 1
             Conduits(i).Enabled = False
         Next
         Me.Enabled = False
@@ -1421,11 +1524,31 @@ Public Class GhGumball
         PreviewGripSlot = -1
         PreviewGripDelta = Transform.Identity
         DisposeSnapTranslateTargets()
-        For i As Int32 = 0 To Count - 1
-            Conduits(i).Enabled = False
-            Conduits(i).Dispose()
-            Gumballs(i).Dispose()
+        If Conduits Is Nothing OrElse Gumballs Is Nothing Then
+            Count = 0
+            Geometry = Nothing
+            Xform = Nothing
+            Me.Enabled = False
+            Return
+        End If
+        Dim nSlots As Integer = Math.Min(Math.Min(Math.Max(Count, 0), Conduits.Length), Gumballs.Length)
+        For i As Int32 = 0 To nSlots - 1
+            Try
+                Conduits(i).Enabled = False
+                Conduits(i).Dispose()
+            Catch
+            End Try
+            Try
+                Gumballs(i).Dispose()
+            Catch
+            End Try
         Next
+        Count = 0
+        Geometry = Nothing
+        Xform = Nothing
+        Gumballs = Nothing
+        Conduits = Nothing
+        Appearances = Nothing
         Me.Enabled = False
     End Sub
 #End Region
@@ -2373,6 +2496,8 @@ Public Class GhGumball
 #Region "Serializable"
 
     Public Function GumballWriter(ByVal writer As GH_IO.Serialization.GH_IWriter) As Boolean
+        If Not IsRuntimeStateCompleteForSerialization() Then Return True
+
         'gbroot 
         '   |
         '   ├─gbdata
@@ -2498,7 +2623,7 @@ Public Class GhGumball
 
     Public Function GumballReader(Reader As GH_IO.Serialization.GH_IReader) As Boolean
 
-        If Not (Reader.ChunkExists("gbroot")) Then
+        If Not GhClipboardRootLooksComplete(Reader) Then
             Return False
             Exit Function
         End If
@@ -2656,9 +2781,10 @@ Public Class GhGumball
             Next
         Catch ex As Exception
             Rhino.RhinoApp.WriteLine("READER_GB; " & ex.ToString())
-
+            ClearAfterFailedOrEmptyDeserialize()
+            Return False
         End Try
-        Return True
+        Return IsRuntimeStateCompleteForSerialization()
     End Function
     '
     '
