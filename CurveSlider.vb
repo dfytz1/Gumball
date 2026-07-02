@@ -129,6 +129,9 @@ Public Class CurveSliderComp
 
         Menu_AppendSeparator(menu)
 
+        Dim lockUnsel As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Lock unselected", AddressOf Menu_LockUnselected, True, Me.LockUnselected)
+        lockUnsel.ToolTipText = "When on, the slider can be dragged or edited only while this component is selected on the Grasshopper canvas."
+
         Dim preserve As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Preserve changes", AddressOf Menu_PreserveChanges, True, Me.PreserveChanges)
         preserve.ToolTipText = "Keep slider values (per item index) when upstream curves move or change."
 
@@ -172,6 +175,12 @@ Public Class CurveSliderComp
             Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
         Catch
         End Try
+    End Sub
+
+    Private Sub Menu_LockUnselected()
+        RecordUndoEvent("Curve Slider Lock Unselected", New CurveSliderUndo(Me))
+        LockUnselected = Not LockUnselected
+        SyncMouse()
     End Sub
 
     Private Sub Menu_PreserveChanges()
@@ -301,6 +310,8 @@ Public Class CurveSliderComp
 
     Public PreserveChanges As Boolean = True
     Public ProximityCache As Boolean = False
+    ''' <summary>When true, viewport interaction requires the component to be selected on the canvas.</summary>
+    Public LockUnselected As Boolean = True
     ''' <summary>Show/enter real curve-domain parameters instead of normalized 0-1.</summary>
     Public ShowRealValue As Boolean = True
     ''' <summary>Adds the D input; values are shown/entered/output remapped into that domain.</summary>
@@ -671,7 +682,8 @@ Public Class CurveSliderComp
     End Function
 
     Friend Sub SetStateFromUndo(newParams As List(Of Double), newPreserve As Boolean, newProximity As Boolean,
-                                newReal As Boolean, newCustomDomain As Boolean, newSnapValues As Boolean, newSnappingTicks As Boolean)
+                                newReal As Boolean, newCustomDomain As Boolean, newSnapValues As Boolean, newSnappingTicks As Boolean,
+                                newLockUnselected As Boolean)
         SliderParams = New List(Of Double)(newParams)
         PreserveChanges = newPreserve
         ProximityCache = newProximity
@@ -680,8 +692,10 @@ Public Class CurveSliderComp
         CustomDomain = newCustomDomain
         SnapValues = newSnapValues
         SnappingTicks = newSnappingTicks
+        LockUnselected = newLockUnselected
         If needSync Then SyncOptionalInputs()
         CloseSliderTextBoxIfAny()
+        SyncMouse()
         Me.ExpireSolution(True)
     End Sub
 
@@ -741,11 +755,11 @@ Public Class CurveSliderComp
         If SliderMouse IsNot Nothing Then SliderMouse.Enabled = False
     End Sub
 
-    ''' <summary>Viewport interaction is live only when the component is selected on canvas, unlocked, previewed and has curves.</summary>
+    ''' <summary>Viewport interaction is live when unlocked, previewed, has curves, and selection rules allow it.</summary>
     Friend Sub SyncMouse()
+        Dim selectionOk As Boolean = Me.Attributes IsNot Nothing AndAlso (Not LockUnselected OrElse Me.Attributes.Selected)
         Dim want As Boolean =
-            Me.Attributes IsNot Nothing AndAlso
-            Me.Attributes.Selected AndAlso
+            selectionOk AndAlso
             Not Me.Locked AndAlso
             Not Me.Hidden AndAlso
             Curves.Count > 0
@@ -1220,6 +1234,7 @@ Public Class CurveSliderComp
         writer.SetBoolean("CS_CustomDomain", CustomDomain)
         writer.SetBoolean("CS_Snap", SnapValues)
         writer.SetBoolean("CS_SnapTicks", SnappingTicks)
+        writer.SetBoolean("CS_LockUnselected", LockUnselected)
         writer.SetInt32("CS_Count", SliderParams.Count)
         For i As Integer = 0 To SliderParams.Count - 1
             writer.SetDouble("CS_Param", i, SliderParams(i))
@@ -1251,6 +1266,10 @@ Public Class CurveSliderComp
         Dim snapTicks As Boolean = False
         reader.TryGetBoolean("CS_SnapTicks", snapTicks)
         SnappingTicks = snapTicks
+
+        Dim lockUnsel As Boolean = True
+        reader.TryGetBoolean("CS_LockUnselected", lockUnsel)
+        LockUnselected = lockUnsel
 
         ' Register the optional D/S inputs before MyBase.Read so archived param data/sources map onto them.
         SyncOptionalInputs()
@@ -1305,6 +1324,7 @@ Public Class CurveSliderUndo
     Private _customDomain As Boolean
     Private _snapValues As Boolean
     Private _snappingTicks As Boolean
+    Private _lockUnselected As Boolean
 
     Sub New(owner As CurveSliderComp)
         _ownerId = owner.InstanceGuid
@@ -1315,6 +1335,7 @@ Public Class CurveSliderUndo
         _customDomain = owner.CustomDomain
         _snapValues = owner.SnapValues
         _snappingTicks = owner.SnappingTicks
+        _lockUnselected = owner.LockUnselected
     End Sub
 
     Protected Overrides Sub Internal_Undo(doc As GH_Document)
@@ -1335,7 +1356,8 @@ Public Class CurveSliderUndo
         Dim curCustom As Boolean = comp.CustomDomain
         Dim curSnap As Boolean = comp.SnapValues
         Dim curSnapTicks As Boolean = comp.SnappingTicks
-        comp.SetStateFromUndo(_params, _preserve, _proximity, _real, _customDomain, _snapValues, _snappingTicks)
+        Dim curLockUnselected As Boolean = comp.LockUnselected
+        comp.SetStateFromUndo(_params, _preserve, _proximity, _real, _customDomain, _snapValues, _snappingTicks, _lockUnselected)
         _params = curParams
         _preserve = curPreserve
         _proximity = curProximity
@@ -1343,6 +1365,7 @@ Public Class CurveSliderUndo
         _customDomain = curCustom
         _snapValues = curSnap
         _snappingTicks = curSnapTicks
+        _lockUnselected = curLockUnselected
     End Sub
 
 End Class

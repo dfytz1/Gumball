@@ -128,6 +128,11 @@ Public Class TextTagComp
 
     Protected Overrides Sub AppendAdditionalComponentMenuItems(menu As Windows.Forms.ToolStripDropDown)
 
+        Dim lockUnsel As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Lock unselected", AddressOf Menu_LockUnselected, True, Me.LockUnselected)
+        lockUnsel.ToolTipText = "When on, tags can be clicked and edited only while this component is selected on the Grasshopper canvas."
+
+        Menu_AppendSeparator(menu)
+
         Dim preserve As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Preserve changes", AddressOf Menu_PreserveChanges, True, Me.PreserveChanges)
         preserve.ToolTipText = "Keep entered text (per item index) when upstream points/planes move or change."
 
@@ -163,6 +168,12 @@ Public Class TextTagComp
 
         Dim justifyLines As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Justify multiline lines", AddressOf Menu_JustifyMultilineLines, True, Me.JustifyMultilineLines)
         justifyLines.ToolTipText = "When text has multiple lines, align each line within the block (shorter lines shift to the chosen horizontal side) instead of only moving the whole block relative to the dot."
+    End Sub
+
+    Private Sub Menu_LockUnselected()
+        RecordUndoEvent("Text Tag Lock Unselected", New TextTagUndo(Me))
+        LockUnselected = Not LockUnselected
+        SyncMouse()
     End Sub
 
     Private Sub Menu_PreserveChanges()
@@ -242,6 +253,9 @@ Public Class TextTagComp
     ''' <summary>When the list changes, re-attach texts to the nearest cached location instead of the list index. Takes precedence over PreserveChanges.</summary>
     Public ProximityCache As Boolean = False
 
+    ''' <summary>When true, viewport interaction requires the component to be selected on the canvas.</summary>
+    Public LockUnselected As Boolean = True
+
     ''' <summary>Horizontal text anchor at the tag point (default: center).</summary>
     Public HorizontalAlign As Rhino.DocObjects.TextHorizontalAlignment = Rhino.DocObjects.TextHorizontalAlignment.Center
 
@@ -267,14 +281,16 @@ Public Class TextTagComp
 
     Friend Sub SetTagTextsFromUndo(newTexts As List(Of String), newPreserve As Boolean, newProximity As Boolean,
                                    newHAlign As Rhino.DocObjects.TextHorizontalAlignment, newVAlign As Rhino.DocObjects.TextVerticalAlignment,
-                                   newJustifyLines As Boolean)
+                                   newJustifyLines As Boolean, newLockUnselected As Boolean)
         Texts = New List(Of String)(newTexts)
         PreserveChanges = newPreserve
         ProximityCache = newProximity
         HorizontalAlign = newHAlign
         VerticalAlign = newVAlign
         JustifyMultilineLines = newJustifyLines
+        LockUnselected = newLockUnselected
         CloseTagTextBoxIfAny()
+        SyncMouse()
         Me.ExpireSolution(True)
     End Sub
 
@@ -321,11 +337,11 @@ Public Class TextTagComp
         If TagMouse IsNot Nothing Then TagMouse.Enabled = False
     End Sub
 
-    ''' <summary>Viewport clicks are live only when the component is selected on canvas, unlocked, previewed and has anchors.</summary>
+    ''' <summary>Viewport clicks are live when unlocked, previewed, has anchors, and selection rules allow it.</summary>
     Friend Sub SyncMouse()
+        Dim selectionOk As Boolean = Me.Attributes IsNot Nothing AndAlso (Not LockUnselected OrElse Me.Attributes.Selected)
         Dim want As Boolean =
-            Me.Attributes IsNot Nothing AndAlso
-            Me.Attributes.Selected AndAlso
+            selectionOk AndAlso
             Not Me.Locked AndAlso
             Not Me.Hidden AndAlso
             Slots.Count > 0
@@ -666,6 +682,7 @@ Public Class TextTagComp
         writer.SetInt32("TT_HAlign", CInt(HorizontalAlign))
         writer.SetInt32("TT_VAlign", CInt(VerticalAlign))
         writer.SetBoolean("TT_JustifyLines", JustifyMultilineLines)
+        writer.SetBoolean("TT_LockUnselected", LockUnselected)
         writer.SetInt32("TT_Count", Texts.Count)
         For i As Integer = 0 To Texts.Count - 1
             writer.SetString("TT_Text", i, If(Texts(i), String.Empty))
@@ -695,6 +712,10 @@ Public Class TextTagComp
         Dim justifyLines As Boolean = True
         reader.TryGetBoolean("TT_JustifyLines", justifyLines)
         JustifyMultilineLines = justifyLines
+
+        Dim lockUnsel As Boolean = True
+        reader.TryGetBoolean("TT_LockUnselected", lockUnsel)
+        LockUnselected = lockUnsel
 
         Texts.Clear()
         Dim n As Integer = 0
@@ -745,6 +766,7 @@ Public Class TextTagUndo
     Private _hAlign As Rhino.DocObjects.TextHorizontalAlignment
     Private _vAlign As Rhino.DocObjects.TextVerticalAlignment
     Private _justifyLines As Boolean
+    Private _lockUnselected As Boolean
 
     Sub New(owner As TextTagComp)
         _ownerId = owner.InstanceGuid
@@ -754,6 +776,7 @@ Public Class TextTagUndo
         _hAlign = owner.HorizontalAlign
         _vAlign = owner.VerticalAlign
         _justifyLines = owner.JustifyMultilineLines
+        _lockUnselected = owner.LockUnselected
     End Sub
 
     Protected Overrides Sub Internal_Undo(doc As GH_Document)
@@ -773,13 +796,15 @@ Public Class TextTagUndo
         Dim curH As Rhino.DocObjects.TextHorizontalAlignment = comp.HorizontalAlign
         Dim curV As Rhino.DocObjects.TextVerticalAlignment = comp.VerticalAlign
         Dim curJustify As Boolean = comp.JustifyMultilineLines
-        comp.SetTagTextsFromUndo(_texts, _preserve, _proximity, _hAlign, _vAlign, _justifyLines)
+        Dim curLockUnselected As Boolean = comp.LockUnselected
+        comp.SetTagTextsFromUndo(_texts, _preserve, _proximity, _hAlign, _vAlign, _justifyLines, _lockUnselected)
         _texts = curTexts
         _preserve = curPreserve
         _proximity = curProximity
         _hAlign = curH
         _vAlign = curV
         _justifyLines = curJustify
+        _lockUnselected = curLockUnselected
     End Sub
 
 End Class
