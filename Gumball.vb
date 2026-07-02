@@ -35,6 +35,8 @@ Friend NotInheritable Class GumballNumericBackdropMouse
         MyBase.OnMouseDown(e)
         FormTextBox.RequestDismissFromBackdropMouse()
         FormAttributes.RequestDismissFromBackdropMouse()
+        FormTextTagBox.RequestDismissFromBackdropMouse()
+        FormCurveSliderBox.RequestDismissFromBackdropMouse()
     End Sub
 End Class
 
@@ -1872,48 +1874,363 @@ Public Class GhGumball
                 dragPoint = snap
             End If
         End If
-        ApplySnapTranslateIfTranslatingGrip(c.PickResult.Mode, dragPoint)
-        Return c.UpdateGumball(dragPoint, wordline)
+
+        If Not c.UpdateGumball(dragPoint, wordline) Then Return False
+
+        ' Geometry snapping: after the raw (constrained) update, stick the gumball origin to the target under the cursor.
+        If SnapTranslateActive(c.PickResult.Mode) Then
+            Dim snapDelta As Vector3d
+            If TryComputeSnapTranslateDelta(c, view, viewportPt, snapDelta) Then
+                dragPoint += snapDelta
+                If wordline.IsValid Then wordline.Transform(Transform.Translation(snapDelta))
+                c.UpdateGumball(dragPoint, wordline)
+            End If
+        End If
+        Return True
     End Function
 
-    Private Sub ApplySnapTranslateIfTranslatingGrip(mode As Rhino.UI.Gumball.GumballMode, ByRef dragPoint As Point3d)
-        If Not IsTranslateGumballMode(mode) Then Return
-        If SnapTranslateTargets Is Nothing OrElse SnapTranslateTargets.Count = 0 Then Return
-        If Component Is Nothing OrElse Not CBool(Component.ModeValue(3)) Then Return
+    ''' <summary>Screen-space snap radius (pixels) used when no t input override is supplied.</summary>
+    Private Const SnapTranslateScreenRadiusPx As Double = 15.0R
 
-        Dim radiusSq As Double
-        If Not Double.IsNaN(SnapTranslateRadiusOverride) AndAlso SnapTranslateRadiusOverride > 0 Then
-            radiusSq = SnapTranslateRadiusOverride * SnapTranslateRadiusOverride
-        Else
-            Dim r As Double = SnapTranslateProximityRadius()
-            radiusSq = r * r
-        End If
-        Dim bestDistSq As Double = Double.PositiveInfinity
-        Dim bestPt As Point3d = dragPoint
+    Private Function SnapTranslateActive(mode As Rhino.UI.Gumball.GumballMode) As Boolean
+        If Not IsTranslateGumballMode(mode) Then Return False
+        If SnapTranslateTargets Is Nothing OrElse SnapTranslateTargets.Count = 0 Then Return False
+        Return Component IsNot Nothing AndAlso CBool(Component.ModeValue(3))
+    End Function
 
-        For Each geom As GeometryBase In SnapTranslateTargets
-            Dim candidate As Point3d
-            If Not TryClosestPointOnSnapGeometry(geom, dragPoint, candidate) Then Continue For
-            Dim ds As Double = dragPoint.DistanceToSquared(candidate)
-            If ds < radiusSq AndAlso ds < bestDistSq Then
-                bestDistSq = ds
-                bestPt = candidate
+    ''' <summary>One snap candidate: a target point plus its osnap class (0 = vertex, 1 = curve/edge, 2 = surface/face).</summary>
+    Private Structure SnapCandidate
+        Public Q As Point3d
+        Public Rank As Integer
+    End Structure
+
+    ''' <summary>Max vertices to enumerate as rank-0 candidates on meshes (guards against huge meshes).</summary>
+    Private Const SnapMeshVertexLimit As Integer = 20000
+
+    ''' <summary>
+    ''' Collects snap candidates for one target: vertices (brep corners, curve endpoints, mesh vertices,
+    ''' points), edge/curve points (global closest-pair to the pick ray), and face/surface points
+    ''' (all ray hits, plus a sampled silhouette fallback when the ray misses).
+    ''' </summary>
+    Private Shared Sub CollectSnapCandidates(geom As GeometryBase, ray As Line, cands As List(Of SnapCandidate))
+        If geom Is Nothing Then Return
+        Try
+            If Not geom.IsValid Then Return
+        Catch
+            Return
+        End Try
+
+        Try
+            Dim pt As Rhino.Geometry.Point = TryCast(geom, Rhino.Geometry.Point)
+            If pt IsNot Nothing Then
+                If pt.Location.IsValid Then cands.Add(New SnapCandidate With {.Q = pt.Location, .Rank = 0})
+                Return
             End If
-        Next
 
-        If bestDistSq <= radiusSq Then dragPoint = bestPt
+            Dim cloud As PointCloud = TryCast(geom, PointCloud)
+            If cloud IsNot Nothing Then
+                Dim best As Point3d = Point3d.Unset
+                Dim bestD2 As Double = Double.PositiveInfinity
+                For Each item As PointCloudItem In cloud
+                    Dim d2 As Double = item.Location.DistanceToSquared(ray.ClosestPoint(item.Location, False))
+                    If d2 < bestD2 Then
+                        bestD2 = d2
+                        best = item.Location
+                    End If
+                Next
+                If best.IsValid Then cands.Add(New SnapCandidate With {.Q = best, .Rank = 0})
+                Return
+            End If
+
+            Dim crv As Curve = TryCast(geom, Curve)
+            If crv IsNot Nothing Then
+                CollectCurveCandidates(crv, ray, cands, 0, 1)
+                Return
+            End If
+
+            Dim brep As Brep = TryCast(geom, Brep)
+            Dim ownedBrep As Brep = Nothing
+            If brep Is Nothing Then
+                Dim ext As Extrusion = TryCast(geom, Extrusion)
+                If ext IsNot Nothing Then
+                    ownedBrep = ext.ToBrep()
+                Else
+                    Dim srf As Surface = TryCast(geom, Surface)
+                    If srf IsNot Nothing Then ownedBrep = Brep.CreateFromSurface(srf)
+                End If
+                brep = ownedBrep
+            End If
+            If brep IsNot Nothing Then
+                Try
+                    CollectBrepCandidates(brep, ray, cands)
+                Finally
+                    If ownedBrep IsNot Nothing Then ownedBrep.Dispose()
+                End Try
+                Return
+            End If
+
+            Dim mesh As Mesh = TryCast(geom, Mesh)
+            Dim ownedMesh As Mesh = Nothing
+            If mesh Is Nothing Then
+                Dim subd As SubD = TryCast(geom, SubD)
+                If subd IsNot Nothing Then
+                    ownedMesh = Mesh.CreateFromSubD(subd, 2)
+                    mesh = ownedMesh
+                End If
+            End If
+            If mesh IsNot Nothing Then
+                Try
+                    CollectMeshCandidates(mesh, ray, cands)
+                Finally
+                    If ownedMesh IsNot Nothing Then ownedMesh.Dispose()
+                End Try
+                Return
+            End If
+
+            ' Unknown type: sampled surface-rank candidate.
+            Dim q As Point3d
+            If TrySampledClosestToRay(geom, ray, q) Then
+                cands.Add(New SnapCandidate With {.Q = q, .Rank = 2})
+            End If
+        Catch
+        End Try
     End Sub
 
-    Private Shared Function SnapTranslateProximityRadius() As Double
+    ''' <summary>Endpoints as vertex-rank candidates; the globally nearest on-curve point as curve-rank.</summary>
+    Private Shared Sub CollectCurveCandidates(crv As Curve, ray As Line, cands As List(Of SnapCandidate), vertexRank As Integer, curveRank As Integer)
+        If Not crv.IsClosed Then
+            If crv.PointAtStart.IsValid Then cands.Add(New SnapCandidate With {.Q = crv.PointAtStart, .Rank = vertexRank})
+            If crv.PointAtEnd.IsValid Then cands.Add(New SnapCandidate With {.Q = crv.PointAtEnd, .Rank = vertexRank})
+        End If
+        Dim ptCrv As Point3d = Nothing
+        Dim ptRay As Point3d = Nothing
+        Using lc As New LineCurve(ray)
+            If crv.ClosestPoints(lc, ptCrv, ptRay) AndAlso ptCrv.IsValid Then
+                cands.Add(New SnapCandidate With {.Q = ptCrv, .Rank = curveRank})
+                Return
+            End If
+        End Using
+        Dim q As Point3d
+        If TrySampledClosestToRay(crv, ray, q) Then
+            cands.Add(New SnapCandidate With {.Q = q, .Rank = curveRank})
+        End If
+    End Sub
+
+    ''' <summary>Brep corners (rank 0), edges (rank 1), and face ray hits / sampled silhouette (rank 2).</summary>
+    Private Shared Sub CollectBrepCandidates(brep As Brep, ray As Line, cands As List(Of SnapCandidate))
+        For Each v As BrepVertex In brep.Vertices
+            If v.Location.IsValid Then cands.Add(New SnapCandidate With {.Q = v.Location, .Rank = 0})
+        Next
+
+        For Each edge As BrepEdge In brep.Edges
+            Dim ptCrv As Point3d = Nothing
+            Dim ptRay As Point3d = Nothing
+            Using lc As New LineCurve(ray)
+                If edge.ClosestPoints(lc, ptCrv, ptRay) AndAlso ptCrv.IsValid Then
+                    cands.Add(New SnapCandidate With {.Q = ptCrv, .Rank = 1})
+                End If
+            End Using
+        Next
+
         Dim tol As Double = 0.001
         Try
             tol = Rhino.RhinoDoc.ActiveDoc.ModelAbsoluteTolerance
         Catch
-            tol = 0.001
         End Try
-        Return Math.Max(tol * 220R, 0.02R)
+        Dim overlaps As Curve() = Nothing
+        Dim hits As Point3d() = Nothing
+        Dim anyHit As Boolean = False
+        Using lc As New LineCurve(ray)
+            If Rhino.Geometry.Intersect.Intersection.CurveBrep(lc, brep, tol, overlaps, hits) AndAlso hits IsNot Nothing Then
+                For Each h As Point3d In hits
+                    If h.IsValid Then
+                        cands.Add(New SnapCandidate With {.Q = h, .Rank = 2})
+                        anyHit = True
+                    End If
+                Next
+            End If
+        End Using
+        If Not anyHit Then
+            Dim q As Point3d
+            If TrySampledClosestToRay(brep, ray, q) Then
+                cands.Add(New SnapCandidate With {.Q = q, .Rank = 2})
+            End If
+        End If
+    End Sub
+
+    ''' <summary>Mesh: nearest vertex to the ray (rank 0, size-guarded) and face ray hits / sampled fallback (rank 2).</summary>
+    Private Shared Sub CollectMeshCandidates(mesh As Mesh, ray As Line, cands As List(Of SnapCandidate))
+        If mesh.Vertices.Count <= SnapMeshVertexLimit Then
+            Dim best As Point3d = Point3d.Unset
+            Dim bestD2 As Double = Double.PositiveInfinity
+            For i As Integer = 0 To mesh.Vertices.Count - 1
+                Dim vp As Point3d = mesh.Vertices(i)
+                Dim d2 As Double = vp.DistanceToSquared(ray.ClosestPoint(vp, False))
+                If d2 < bestD2 Then
+                    bestD2 = d2
+                    best = vp
+                End If
+            Next
+            If best.IsValid Then cands.Add(New SnapCandidate With {.Q = best, .Rank = 0})
+        End If
+
+        Dim hits As Point3d() = Rhino.Geometry.Intersect.Intersection.MeshLine(mesh, ray)
+        Dim anyHit As Boolean = False
+        If hits IsNot Nothing Then
+            For Each h As Point3d In hits
+                If h.IsValid Then
+                    cands.Add(New SnapCandidate With {.Q = h, .Rank = 2})
+                    anyHit = True
+                End If
+            Next
+        End If
+        If Not anyHit Then
+            Dim q As Point3d
+            If TrySampledClosestToRay(mesh, ray, q) Then
+                cands.Add(New SnapCandidate With {.Q = q, .Rank = 2})
+            End If
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' Global search fallback: sample the pick ray densely, project each sample onto the geometry,
+    ''' keep the candidate nearest the ray, then polish with a few alternating projections.
+    ''' </summary>
+    Private Shared Function TrySampledClosestToRay(geom As GeometryBase, ray As Line, ByRef q As Point3d) As Boolean
+        Const samples As Integer = 48
+        Dim best As Point3d = Point3d.Unset
+        Dim bestD2 As Double = Double.PositiveInfinity
+        For i As Integer = 0 To samples
+            Dim p As Point3d = ray.PointAt(CDbl(i) / CDbl(samples))
+            Dim cq As Point3d
+            If Not TryClosestPointOnSnapGeometry(geom, p, cq) Then Continue For
+            Dim d2 As Double = cq.DistanceToSquared(ray.ClosestPoint(cq, False))
+            If d2 < bestD2 Then
+                bestD2 = d2
+                best = cq
+            End If
+        Next
+        If Not best.IsValid Then Return False
+
+        For it As Integer = 0 To 2
+            Dim rp As Point3d = ray.ClosestPoint(best, False)
+            Dim refined As Point3d
+            If Not TryClosestPointOnSnapGeometry(geom, rp, refined) Then Exit For
+            best = refined
+        Next
+        q = best
+        Return q.IsValid
     End Function
 
+    ''' <summary>
+    ''' Ray-based snapping (osnap feel): candidates are the target points nearest the mouse pick ray,
+    ''' accepted when they lie within the pixel radius of the cursor (or the model-space t override,
+    ''' measured ray-to-target). The winning point is applied through the active translate constraint.
+    ''' </summary>
+    Private Function TryComputeSnapTranslateDelta(c As Rhino.UI.Gumball.GumballDisplayConduit, view As Rhino.Display.RhinoView, viewportPt As Drawing.Point, ByRef delta As Vector3d) As Boolean
+        delta = Vector3d.Zero
+        If view Is Nothing Then Return False
+
+        ' c.Gumball is the *current* (dragged) gumball: BaseGumball with GumballTransform applied.
+        Dim dragPlane As Plane
+        Try
+            dragPlane = c.Gumball.Frame.Plane
+        Catch
+            Return False
+        End Try
+        Dim draggedOrigin As Point3d = dragPlane.Origin
+        If Not draggedOrigin.IsValid Then Return False
+
+        Dim ray As Line = Nothing
+        If Not view.MainViewport.GetFrustumLine(CDbl(viewportPt.X), CDbl(viewportPt.Y), ray) Then Return False
+        If Not ray.IsValid Then Return False
+
+        Dim overrideRadius As Double = Double.NaN
+        If Not Double.IsNaN(SnapTranslateRadiusOverride) AndAlso SnapTranslateRadiusOverride > 0 Then
+            overrideRadius = SnapTranslateRadiusOverride
+        End If
+
+        Dim cursor As New Rhino.Geometry.Point2d(CDbl(viewportPt.X), CDbl(viewportPt.Y))
+        Dim cameraLocation As Point3d = ray.To
+        Try
+            Dim camPt As Point3d = view.MainViewport.CameraLocation
+            If camPt.IsValid Then cameraLocation = camPt
+        Catch
+        End Try
+
+        ' All candidates from all targets: vertices, edges/curves, faces/surfaces.
+        Dim cands As New List(Of SnapCandidate)
+        For Each geom As GeometryBase In SnapTranslateTargets
+            CollectSnapCandidates(geom, ray, cands)
+        Next
+        If cands.Count = 0 Then Return False
+
+        ' Selection: only in-radius candidates compete. Vertices beat edges beat faces;
+        ' within vertices/edges the one closest to the cursor wins; within faces the
+        ' front-most hit (closest to the camera along the ray) wins.
+        Dim bestQ As Point3d = Point3d.Unset
+        Dim bestRank As Integer = Integer.MaxValue
+        Dim bestMetric As Double = Double.PositiveInfinity
+
+        For Each cand As SnapCandidate In cands
+            Dim q As Point3d = cand.Q
+            If Not q.IsValid Then Continue For
+
+            If Not Double.IsNaN(overrideRadius) Then
+                ' t input: fixed model-space radius, measured from the pick ray to the candidate.
+                If q.DistanceTo(ray.ClosestPoint(q, False)) > overrideRadius Then Continue For
+            Else
+                ' Default: what's visually near the cursor snaps, regardless of depth.
+                Dim sq As Rhino.Geometry.Point2d = view.MainViewport.WorldToClient(q)
+                Dim dPx As Double = Math.Sqrt((sq.X - cursor.X) * (sq.X - cursor.X) + (sq.Y - cursor.Y) * (sq.Y - cursor.Y))
+                If dPx > SnapTranslateScreenRadiusPx Then Continue For
+            End If
+
+            Dim metric As Double
+            If cand.Rank >= 2 Then
+                ' Faces/surfaces: depth — nearest to the camera wins.
+                ' (GetFrustumLine runs far→near, so ray.From is the FAR plane; use the camera itself.)
+                metric = q.DistanceToSquared(cameraLocation)
+            Else
+                ' Vertices and edges: cursor proximity in pixels.
+                Dim sq2 As Rhino.Geometry.Point2d = view.MainViewport.WorldToClient(q)
+                metric = (sq2.X - cursor.X) * (sq2.X - cursor.X) + (sq2.Y - cursor.Y) * (sq2.Y - cursor.Y)
+            End If
+
+            If cand.Rank < bestRank OrElse (cand.Rank = bestRank AndAlso metric < bestMetric) Then
+                bestRank = cand.Rank
+                bestMetric = metric
+                bestQ = q
+            End If
+        Next
+        If Not bestQ.IsValid Then Return False
+
+        ' Keep only the components of the correction the active grip is allowed to move along.
+        delta = ConstrainSnapVectorToMode(c.PickResult.Mode, dragPlane, bestQ - draggedOrigin)
+        Return delta.Length > Rhino.RhinoMath.ZeroTolerance
+    End Function
+
+    ''' <summary>Projects the snap correction vector onto the translation constraint (axis, plane, or free).</summary>
+    Private Shared Function ConstrainSnapVectorToMode(mode As Rhino.UI.Gumball.GumballMode, dragPlane As Plane, v As Vector3d) As Vector3d
+        Select Case mode
+            Case Rhino.UI.Gumball.GumballMode.TranslateX
+                Return dragPlane.XAxis * (v * dragPlane.XAxis)
+            Case Rhino.UI.Gumball.GumballMode.TranslateY
+                Return dragPlane.YAxis * (v * dragPlane.YAxis)
+            Case Rhino.UI.Gumball.GumballMode.TranslateZ
+                Return dragPlane.ZAxis * (v * dragPlane.ZAxis)
+            Case Rhino.UI.Gumball.GumballMode.TranslateXY
+                Return v - dragPlane.ZAxis * (v * dragPlane.ZAxis)
+            Case Rhino.UI.Gumball.GumballMode.TranslateYZ
+                Return v - dragPlane.XAxis * (v * dragPlane.XAxis)
+            Case Rhino.UI.Gumball.GumballMode.TranslateZX
+                Return v - dragPlane.YAxis * (v * dragPlane.YAxis)
+            Case Else ' TranslateFree
+                Return v
+        End Select
+    End Function
+
+    ''' <summary>Closest point on any supported snap target geometry. Type dispatch by TryCast so curve/surface subclasses always resolve.</summary>
     Private Shared Function TryClosestPointOnSnapGeometry(geom As GeometryBase, p As Point3d, ByRef q As Point3d) As Boolean
         If geom Is Nothing Then Return False
         Try
@@ -1922,66 +2239,107 @@ Public Class GhGumball
             Return False
         End Try
 
-        Dim ext As Extrusion = TryCast(geom, Extrusion)
-        If ext IsNot Nothing Then
-            Dim tb As Brep = ext.ToBrep()
-            Try
-                Return TryClosestBrepSnapPoint(tb, p, q)
-            Finally
-                tb.Dispose()
-            End Try
-        End If
+        Try
+            Dim pt As Rhino.Geometry.Point = TryCast(geom, Rhino.Geometry.Point)
+            If pt IsNot Nothing Then
+                q = pt.Location
+                Return q.IsValid
+            End If
 
-        Select Case geom.ObjectType
-            Case Rhino.DocObjects.ObjectType.Brep
-                Return TryClosestBrepSnapPoint(DirectCast(geom, Brep), p, q)
+            Dim cloud As PointCloud = TryCast(geom, PointCloud)
+            If cloud IsNot Nothing Then
+                If cloud.Count = 0 Then Return False
+                Dim ix As Integer = cloud.ClosestPoint(p)
+                If ix < 0 Then Return False
+                q = cloud(ix).Location
+                Return q.IsValid
+            End If
 
-            Case Rhino.DocObjects.ObjectType.Mesh
-                Dim mesh As Mesh = DirectCast(geom, Mesh)
-                Dim mp As MeshPoint = mesh.ClosestMeshPoint(p, 0.0#)
-                If mp Is Nothing Then Return False
-                q = mesh.PointAt(mp)
-                Return True
-
-            Case Rhino.DocObjects.ObjectType.Curve
-                Dim crv As Curve = DirectCast(geom, Curve)
+            Dim crv As Curve = TryCast(geom, Curve)
+            If crv IsNot Nothing Then
                 Dim t As Double
                 If Not crv.ClosestPoint(p, t) Then Return False
                 q = crv.PointAt(t)
-                Return True
+                Return q.IsValid
+            End If
 
-            Case Rhino.DocObjects.ObjectType.Point
-                q = DirectCast(geom, Rhino.Geometry.Point).Location
-                Return True
+            Dim brep As Brep = TryCast(geom, Brep)
+            If brep IsNot Nothing Then
+                Return TryClosestBrepSnapPoint(brep, p, q)
+            End If
 
-            Case Else
-                Dim srf As Surface = TryCast(geom, Surface)
-                If srf IsNot Nothing Then
-                    Dim u, v As Double
-                    If Not srf.ClosestPoint(p, u, v) Then Return False
-                    q = srf.PointAt(u, v)
-                    Return True
-                End If
-                Dim crv2 As Curve = TryCast(geom, Curve)
-                If crv2 IsNot Nothing Then
-                    Dim tt As Double
-                    If Not crv2.ClosestPoint(p, tt) Then Return False
-                    q = crv2.PointAt(tt)
-                    Return True
-                End If
-                Return False
-        End Select
+            ' Extrusion before generic Surface: capped solids need the full brep (walls + caps).
+            Dim ext As Extrusion = TryCast(geom, Extrusion)
+            If ext IsNot Nothing Then
+                Dim tb As Brep = ext.ToBrep()
+                If tb Is Nothing Then Return False
+                Try
+                    Return TryClosestBrepSnapPoint(tb, p, q)
+                Finally
+                    tb.Dispose()
+                End Try
+            End If
+
+            Dim srf As Surface = TryCast(geom, Surface)
+            If srf IsNot Nothing Then
+                Dim u, v As Double
+                If Not srf.ClosestPoint(p, u, v) Then Return False
+                q = srf.PointAt(u, v)
+                Return q.IsValid
+            End If
+
+            Dim mesh As Mesh = TryCast(geom, Mesh)
+            If mesh IsNot Nothing Then
+                Dim mp As MeshPoint = mesh.ClosestMeshPoint(p, 0.0#)
+                If mp Is Nothing Then Return False
+                q = mesh.PointAt(mp)
+                Return q.IsValid
+            End If
+
+            Dim subd As SubD = TryCast(geom, SubD)
+            If subd IsNot Nothing Then
+                Dim sm As Mesh = Mesh.CreateFromSubD(subd, 2)
+                If sm Is Nothing Then Return False
+                Try
+                    Dim smp As MeshPoint = sm.ClosestMeshPoint(p, 0.0#)
+                    If smp Is Nothing Then Return False
+                    q = sm.PointAt(smp)
+                    Return q.IsValid
+                Finally
+                    sm.Dispose()
+                End Try
+            End If
+        Catch
+            Return False
+        End Try
+
+        Return False
     End Function
 
     Private Shared Function TryClosestBrepSnapPoint(brep As Brep, p As Point3d, ByRef q As Point3d) As Boolean
         Dim cpt As New Point3d
         Dim ci As ComponentIndex
         Dim nv As Vector3d
-        If brep.ClosestPoint(p, cpt, ci, Nothing, Nothing, 0, nv) Then
+        If brep.ClosestPoint(p, cpt, ci, Nothing, Nothing, 0, nv) AndAlso cpt.IsValid Then
             q = cpt
             Return True
         End If
-        Return False
+        ' Some invalid-ish breps fail the component search; fall back to per-face closest point.
+        Dim bestD2 As Double = Double.PositiveInfinity
+        Dim found As Boolean = False
+        For Each f As BrepFace In brep.Faces
+            Dim u, v As Double
+            If Not f.ClosestPoint(p, u, v) Then Continue For
+            Dim fp As Point3d = f.PointAt(u, v)
+            If Not fp.IsValid Then Continue For
+            Dim d2 As Double = p.DistanceToSquared(fp)
+            If d2 < bestD2 Then
+                bestD2 = d2
+                q = fp
+                found = True
+            End If
+        Next
+        Return found
     End Function
 
     ''' <summary>Priming translate grips via UpdateGumball at a CPlane pick introduces a bogus translation versus axis-only numeric moves; numeric entry must leave the conduit on the stored base gumball.</summary>
