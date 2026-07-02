@@ -15,11 +15,11 @@
     <LangVersion>latest</LangVersion>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <NoWarn>42016,41999,42017,42018,42019,42032,42036,42020,42021,42022,NU1701,NETSDK1086</NoWarn>
-    <Version>2.1.0</Version>
+    <Version>2.2.0</Version>
     <Title>GumballGH</Title>
     <Authors>GIA</Authors>
     <Company>GIA</Company>
-    <Description>Viewport gumball, Text Tag and Curve Slider for Grasshopper: gumball transforms with ray-based osnap snapping; viewport text tags and curve sliders with preserve/proximity cache (Rhino 8 / .NET 8).</Description>
+    <Description>Viewport gumball, Text Tag and Curve Slider for Grasshopper: gumball transforms with ray-based osnap snapping; viewport text tags and zoom-adaptive curve sliders with dynamic ruler ticks (Rhino 8 / .NET 8).</Description>
   </PropertyGroup>
 
   <!-- Rhino / Grasshopper (Rhino 8). Pin to match your installed Rhino 8 service release if needed.

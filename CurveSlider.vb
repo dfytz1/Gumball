@@ -330,6 +330,262 @@ Public Class CurveSliderComp
         Return result
     End Function
 
+    ''' <summary>Minimum on-screen spacing between ruler tick marks (pixels).</summary>
+    Private Const RulerMinTickSpacingPx As Double = 10.0R
+
+    ''' <summary>Minimum on-screen spacing between numeric ruler labels (pixels).</summary>
+    Private Const RulerMinLabelSpacingPx As Double = 78.0R
+
+    ''' <summary>Hard cap on ruler ticks drawn in the visible range.</summary>
+    Private Const RulerMaxTickCount As Integer = 250
+
+    ''' <summary>Screen-space radius for snap/ruler label collision (small — only near-identical values).</summary>
+    Private Const SnapLabelClearancePx As Double = 28.0R
+
+    Private Shared Function ViewportDiagonalPx(vp As RhinoViewport) As Double
+        Dim w As Double = 1920.0R
+        Dim h As Double = 1080.0R
+        If vp IsNot Nothing Then
+            Try
+                Dim b As System.Drawing.Rectangle = vp.Bounds
+                If b.Width > 0 AndAlso b.Height > 0 Then
+                    w = CDbl(b.Width)
+                    h = CDbl(b.Height)
+                End If
+            Catch
+            End Try
+        End If
+        Return Math.Sqrt(w * w + h * h)
+    End Function
+
+    Private Shared Function IsNearViewport(sp As Rhino.Geometry.Point2d, bounds As System.Drawing.Rectangle, marginPx As Double) As Boolean
+        Return sp.X >= bounds.Left - marginPx AndAlso sp.X <= bounds.Right + marginPx AndAlso
+               sp.Y >= bounds.Top - marginPx AndAlso sp.Y <= bounds.Bottom + marginPx
+    End Function
+
+    Private Shared Function ViewportVisibilityMarginPx(vp As RhinoViewport) As Double
+        Return Math.Max(80.0R, ViewportDiagonalPx(vp) * 0.18R)
+    End Function
+
+    ''' <summary>True when the curve point at normalized t is on or near the viewport.</summary>
+    Private Shared Function IsCurvePointNearViewport(vp As RhinoViewport, crv As Curve, tNorm As Double) As Boolean
+        If vp Is Nothing OrElse crv Is Nothing Then Return False
+        Dim pt As Point3d = crv.PointAt(crv.Domain.ParameterAt(Math.Max(0.0R, Math.Min(1.0R, tNorm))))
+        If Not pt.IsValid Then Return False
+        Dim sp As Rhino.Geometry.Point2d = vp.WorldToClient(pt)
+        Return IsNearViewport(sp, vp.Bounds, ViewportVisibilityMarginPx(vp))
+    End Function
+
+    ''' <summary>Normalized parameter interval of the curve currently visible in the viewport.</summary>
+    Private Shared Function TryVisibleNormalizedRange(crv As Curve, vp As RhinoViewport, ByRef tLo As Double, ByRef tHi As Double) As Boolean
+        tLo = 0
+        tHi = 1
+        If crv Is Nothing OrElse vp Is Nothing Then Return False
+
+        Const samples As Integer = 256
+        Dim bounds As System.Drawing.Rectangle = vp.Bounds
+        Dim margin As Double = ViewportVisibilityMarginPx(vp)
+        Dim found As Boolean = False
+
+        For i As Integer = 0 To samples
+            Dim t As Double = CDbl(i) / CDbl(samples)
+            Dim wp As Point3d = crv.PointAt(crv.Domain.ParameterAt(t))
+            If Not wp.IsValid Then Continue For
+            Dim sp As Rhino.Geometry.Point2d = vp.WorldToClient(wp)
+            If Not IsNearViewport(sp, bounds, margin) Then Continue For
+            If Not found Then
+                tLo = t
+                tHi = t
+                found = True
+            Else
+                tLo = Math.Min(tLo, t)
+                tHi = Math.Max(tHi, t)
+            End If
+        Next
+
+        If Not found Then Return False
+
+        ' Pad generously so edge ticks are not culled when the estimate is slightly tight.
+        Dim padT As Double = Math.Max(0.04R, (tHi - tLo) * 0.22R + 2.0R / CDbl(samples))
+        tLo = Math.Max(0.0R, tLo - padT)
+        tHi = Math.Min(1.0R, tHi + padT)
+        Return True
+    End Function
+
+    ''' <summary>Display-value step from local on-screen scale at t — keeps refining as the user zooms in.</summary>
+    Private Function ComputeRawRulerStepAt(index As Integer, crv As Curve, vp As RhinoViewport, tCenter As Double) As Double
+        Const dtNorm As Double = 0.002R
+        Dim tA As Double = Math.Max(0.0R, tCenter - dtNorm)
+        Dim tB As Double = Math.Min(1.0R, tCenter + dtNorm)
+        If tB - tA < 0.00001R Then Return 0
+
+        Dim vA As Double = DisplayValueAtNormalized(index, tA)
+        Dim vB As Double = DisplayValueAtNormalized(index, tB)
+        Dim vSpan As Double = Math.Abs(vB - vA)
+        If vSpan <= 0 Then Return 0
+
+        Dim pA As Rhino.Geometry.Point2d = vp.WorldToClient(crv.PointAt(crv.Domain.ParameterAt(tA)))
+        Dim pB As Rhino.Geometry.Point2d = vp.WorldToClient(crv.PointAt(crv.Domain.ParameterAt(tB)))
+        Dim dx As Double = pB.X - pA.X
+        Dim dy As Double = pB.Y - pA.Y
+        Dim pxDist As Double = Math.Sqrt(dx * dx + dy * dy)
+        If pxDist < 0.5R Then Return 0
+
+        Return vSpan / pxDist * RulerMinTickSpacingPx
+    End Function
+
+    ''' <summary>On-screen curve length using only viewport-near samples (off-screen points are ignored).</summary>
+    Private Shared Function EstimateVisibleCurveScreenLength(crv As Curve, vp As RhinoViewport) As Double
+        If crv Is Nothing OrElse vp Is Nothing Then Return 0
+
+        Const samples As Integer = 48
+        Dim diag As Double = ViewportDiagonalPx(vp)
+        Dim margin As Double = diag * 0.25R
+        Dim maxSeg As Double = diag * 0.5R
+        Dim bounds As System.Drawing.Rectangle = vp.Bounds
+
+        Dim screenLen As Double = 0
+        Dim prevSp As New Rhino.Geometry.Point2d
+        Dim hasPrev As Boolean = False
+        Dim prevVis As Boolean = False
+
+        For i As Integer = 0 To samples
+            Dim wp As Point3d = crv.PointAt(crv.Domain.ParameterAt(CDbl(i) / CDbl(samples)))
+            If Not wp.IsValid Then Continue For
+            Dim sp As Rhino.Geometry.Point2d = vp.WorldToClient(wp)
+            Dim vis As Boolean = IsNearViewport(sp, bounds, margin)
+
+            If hasPrev AndAlso (vis OrElse prevVis) Then
+                Dim dx As Double = sp.X - prevSp.X
+                Dim dy As Double = sp.Y - prevSp.Y
+                Dim seg As Double = Math.Sqrt(dx * dx + dy * dy)
+                If seg > maxSeg Then seg = maxSeg
+                screenLen += seg
+            End If
+
+            prevSp = sp
+            prevVis = vis
+            hasPrev = True
+        Next
+
+        ' Fallback when the curve is mostly off-screen: arc length × local px/unit at midpoint.
+        If screenLen < 60.0R Then
+            Dim mid As Point3d = crv.PointAt(crv.Domain.Mid)
+            Dim pxPerUnit As Double = 0
+            vp.GetWorldToScreenScale(mid, pxPerUnit)
+            If pxPerUnit > 0 Then
+                Dim arcLen As Double = crv.GetLength()
+                If arcLen > 0 Then screenLen = arcLen * pxPerUnit
+            End If
+        End If
+
+        ' A curve cannot usefully appear longer than ~1.5× the viewport diagonal.
+        Dim cap As Double = diag * 1.5R
+        If screenLen > cap Then screenLen = cap
+        Return screenLen
+    End Function
+
+    ''' <summary>Round a step size up to the next 1/2/5 × 10^k value.</summary>
+    Private Shared Function SnapRulerStepUp(rawStep As Double) As Double
+        If rawStep <= 0 OrElse Double.IsNaN(rawStep) OrElse Double.IsInfinity(rawStep) Then Return 0
+        Dim log10 As Double = Math.Log10(rawStep)
+        If Double.IsNaN(log10) OrElse Double.IsInfinity(log10) Then Return rawStep
+        Dim decade As Double = Math.Pow(10.0R, Math.Floor(log10))
+        If decade <= 0 OrElse Double.IsNaN(decade) OrElse Double.IsInfinity(decade) Then Return rawStep
+        Dim mant As Double = rawStep / decade
+        If mant <= 1.0R Then Return decade
+        If mant <= 2.0R Then Return 2.0R * decade
+        If mant <= 5.0R Then Return 5.0R * decade
+        Return 10.0R * decade
+    End Function
+
+    Private Shared Sub ApplyRulerMajorEvery(rawStep As Double, ByRef stepVal As Double, ByRef majorEvery As Integer)
+        Dim log10 As Double = Math.Log10(rawStep)
+        If Double.IsNaN(log10) OrElse Double.IsInfinity(log10) Then
+            majorEvery = 10
+            Return
+        End If
+        Dim decade As Double = Math.Pow(10.0R, Math.Floor(log10))
+        If decade <= 0 Then
+            majorEvery = 10
+            Return
+        End If
+        Dim mant As Double = rawStep / decade
+        If mant <= 1.0R Then
+            stepVal = decade
+            majorEvery = 10
+        ElseIf mant <= 2.0R Then
+            stepVal = 2.0R * decade
+            majorEvery = 5
+        ElseIf mant <= 5.0R Then
+            stepVal = 5.0R * decade
+            majorEvery = 2
+        Else
+            stepVal = 10.0R * decade
+            majorEvery = 10
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' Ruler layout for one curve in one viewport: minor step in display units (1/2/5 × 10^k series)
+    ''' and how many minors per labeled major. Denser as the curve takes more screen space.
+    ''' </summary>
+    Friend Function TryComputeRulerStep(index As Integer, vp As RhinoViewport, ByRef stepVal As Double, ByRef majorEvery As Integer) As Boolean
+        stepVal = 0
+        majorEvery = 10
+        If vp Is Nothing OrElse index < 0 OrElse index >= Curves.Count Then Return False
+        Dim crv As Curve = Curves(index)
+        If crv Is Nothing Then Return False
+
+        Dim tVisLo As Double, tVisHi As Double
+        If Not TryVisibleNormalizedRange(crv, vp, tVisLo, tVisHi) Then Return False
+
+        Dim dVis0 As Double = DisplayValueAtNormalized(index, tVisLo)
+        Dim dVis1 As Double = DisplayValueAtNormalized(index, tVisHi)
+        Dim visSpan As Double = Math.Abs(dVis1 - dVis0)
+
+        Dim d0 As Double = DisplayValueAtNormalized(index, 0.0R)
+        Dim d1 As Double = DisplayValueAtNormalized(index, 1.0R)
+        Dim span As Double = Math.Abs(d1 - d0)
+        If span < Rhino.RhinoMath.ZeroTolerance Then Return False
+        If visSpan < Rhino.RhinoMath.ZeroTolerance Then visSpan = span
+
+        Dim tCenter As Double = (tVisLo + tVisHi) * 0.5R
+        Dim rawStep As Double = ComputeRawRulerStepAt(index, crv, vp, tCenter)
+        If rawStep <= 0 OrElse Double.IsNaN(rawStep) OrElse Double.IsInfinity(rawStep) Then
+            ' Fallback when local scale is degenerate.
+            Dim screenLen As Double = EstimateVisibleCurveScreenLength(crv, vp)
+            If screenLen < 20.0R Then Return False
+            rawStep = visSpan * RulerMinTickSpacingPx / screenLen
+        End If
+        If rawStep <= 0 OrElse Double.IsNaN(rawStep) OrElse Double.IsInfinity(rawStep) Then Return False
+
+        ApplyRulerMajorEvery(rawStep, stepVal, majorEvery)
+
+        ' Cap tick density in the visible range only (not the full curve domain).
+        Dim minStep As Double = visSpan / CDbl(RulerMaxTickCount)
+        If stepVal < minStep Then
+            stepVal = SnapRulerStepUp(minStep)
+            ApplyRulerMajorEvery(stepVal, stepVal, majorEvery)
+        End If
+
+        Return stepVal > 0
+    End Function
+
+    ''' <summary>Quantize a normalized drag parameter to the current ruler step — precision follows zoom. Typed values stay exact.</summary>
+    Friend Function QuantizeToRulerStep(index As Integer, tNorm As Double, view As Rhino.Display.RhinoView) As Double
+        If view Is Nothing Then Return tNorm
+        Dim stepVal As Double
+        Dim majorEvery As Integer
+        If Not TryComputeRulerStep(index, view.ActiveViewport, stepVal, majorEvery) Then Return tNorm
+        Dim v As Double = DisplayValueAtNormalized(index, tNorm)
+        v = Math.Round(v / stepVal) * stepVal
+        Dim t As Double
+        If Not TryNormalizedFromDisplayValueUnclamped(index, v, t) Then Return tNorm
+        If Double.IsNaN(t) Then Return tNorm
+        Return Math.Max(0.0R, Math.Min(1.0R, t))
+    End Function
+
     ''' <summary>Displayed value → normalized t per current settings (clamped 0-1).</summary>
     Friend Function NormalizedFromDisplayValue(index As Integer, value As Double) As Double
         Dim t As Double
@@ -575,37 +831,231 @@ Public Class CurveSliderComp
 
 #Region "Preview"
 
-    ''' <summary>Draw a camera-facing tick perpendicular to the curve at normalized t; half-length given in pixels.</summary>
-    Private Shared Sub DrawCurveTick(args As IGH_PreviewArgs, crv As Curve, tNorm As Double, halfLenPx As Double, col As Color, thickness As Integer,
-                                     Optional tickLabel As String = Nothing)
-        Dim tRaw As Double = crv.Domain.ParameterAt(Math.Max(0.0R, Math.Min(1.0R, tNorm)))
-        Dim pt As Point3d = crv.PointAt(tRaw)
-        If Not pt.IsValid Then Return
-        Dim tan As Vector3d = crv.TangentAt(tRaw)
-        Dim camZ As Vector3d = args.Viewport.CameraZ
-        Dim tickDir As Vector3d = Vector3d.CrossProduct(tan, camZ)
-        If Not tickDir.Unitize() Then
-            tickDir = Vector3d.CrossProduct(tan, args.Viewport.CameraY)
-            If Not tickDir.Unitize() Then Return
-        End If
-        ' Convert pixel length to world units at this point.
-        Dim pxPerUnit As Double = 0
-        args.Viewport.GetWorldToScreenScale(pt, pxPerUnit)
-        If pxPerUnit <= 0 Then Return
-        Dim halfLen As Double = halfLenPx / pxPerUnit
-        Dim a As Point3d = pt + tickDir * halfLen
-        Dim b As Point3d = pt - tickDir * halfLen
-        args.Display.DrawLine(New Line(a, b), col, thickness)
+    Private Enum CurveTickKind
+        Minor
+        Major
+        EndCap
+        SnapValue
+    End Enum
 
-        If tickLabel IsNot Nothing Then
-            Dim screenPt As Rhino.Geometry.Point2d = args.Viewport.WorldToClient(pt)
-            args.Display.Draw2dText(tickLabel, col, New Rhino.Geometry.Point2d(screenPt.X + 6.0R, screenPt.Y - 6.0R), True, 10)
+    ''' <summary>Curve tangent (tx,ty) in screen pixels at normalized t.</summary>
+    Private Shared Function TryCurveScreenTangent(args As IGH_PreviewArgs, crv As Curve, tNorm As Double, ByRef tx As Double, ByRef ty As Double) As Boolean
+        If args Is Nothing OrElse crv Is Nothing Then Return False
+        Const eps As Double = 0.004R
+        Dim tLo As Double = Math.Max(0.0R, tNorm - eps)
+        Dim tHi As Double = Math.Min(1.0R, tNorm + eps)
+        If tHi <= tLo Then Return False
+
+        Dim pLo As Rhino.Geometry.Point2d = args.Viewport.WorldToClient(crv.PointAt(crv.Domain.ParameterAt(tLo)))
+        Dim pHi As Rhino.Geometry.Point2d = args.Viewport.WorldToClient(crv.PointAt(crv.Domain.ParameterAt(tHi)))
+        tx = pHi.X - pLo.X
+        ty = pHi.Y - pLo.Y
+        Dim len As Double = Math.Sqrt(tx * tx + ty * ty)
+        If len < 0.5R Then
+            tx = 1.0R
+            ty = 0.0R
+            Return True
         End If
+        tx /= len
+        ty /= len
+        Return True
+    End Function
+
+    Private Shared Sub Draw2dLinePx(args As IGH_PreviewArgs, x0 As Double, y0 As Double, x1 As Double, y1 As Double, col As Color, thickness As Single)
+        args.Display.Draw2dLine(New PointF(CSng(x0), CSng(y0)), New PointF(CSng(x1), CSng(y1)), col, thickness)
     End Sub
 
-    Private Shared Function FormatTickValue(v As Double) As String
-        Return v.ToString("0.###", Globalization.CultureInfo.InvariantCulture)
+    ''' <summary>Draw a tick in screen pixels so size stays constant regardless of zoom.</summary>
+    Private Shared Sub DrawCurveTick(args As IGH_PreviewArgs, crv As Curve, tNorm As Double, kind As CurveTickKind, col As Color,
+                                     Optional tickLabel As String = Nothing,
+                                     Optional placedLabels As List(Of Rhino.Geometry.Point2d) = Nothing)
+        Dim tClamped As Double = Math.Max(0.0R, Math.Min(1.0R, tNorm))
+        Dim pt As Point3d = crv.PointAt(crv.Domain.ParameterAt(tClamped))
+        If Not pt.IsValid Then Return
+
+        Dim tx As Double, ty As Double
+        If Not TryCurveScreenTangent(args, crv, tClamped, tx, ty) Then Return
+        Dim nx As Double = -ty
+        Dim ny As Double = tx
+
+        Dim sp As Rhino.Geometry.Point2d = args.Viewport.WorldToClient(pt)
+        Dim halfLenPx As Single
+        Dim thickness As Single
+        Select Case kind
+            Case CurveTickKind.Minor
+                halfLenPx = 4.0F
+                thickness = 1.0F
+            Case CurveTickKind.Major
+                halfLenPx = 7.0F
+                thickness = 1.5F
+            Case CurveTickKind.EndCap
+                halfLenPx = 9.0F
+                thickness = 2.0F
+            Case CurveTickKind.SnapValue
+                halfLenPx = 8.0F
+                thickness = 2.0F
+            Case Else
+                halfLenPx = 4.0F
+                thickness = 1.0F
+        End Select
+
+        Draw2dLinePx(args, sp.X - nx * halfLenPx, sp.Y - ny * halfLenPx, sp.X + nx * halfLenPx, sp.Y + ny * halfLenPx, col, thickness)
+
+        If kind = CurveTickKind.SnapValue Then
+            Const dotHalf As Integer = 3
+            Dim dotRect As New Rectangle(CInt(Math.Round(sp.X)) - dotHalf, CInt(Math.Round(sp.Y)) - dotHalf, dotHalf * 2, dotHalf * 2)
+            args.Display.Draw2dRectangle(dotRect, col, 0, col)
+            Dim capHalf As Single = 3.5F
+            Dim tipX As Double = sp.X + nx * halfLenPx
+            Dim tipY As Double = sp.Y + ny * halfLenPx
+            Draw2dLinePx(args, tipX - tx * capHalf, tipY - ty * capHalf, tipX + tx * capHalf, tipY + ty * capHalf, col, thickness)
+        End If
+
+        If tickLabel Is Nothing Then Return
+
+        Dim anchor As Rhino.Geometry.Point2d
+        If kind = CurveTickKind.SnapValue Then
+            anchor = SnapLabelAnchor(sp, nx, ny, tx, ty, halfLenPx)
+        Else
+            anchor = RulerLabelAnchor(sp, nx, ny, tx, ty, halfLenPx)
+        End If
+
+        If placedLabels IsNot Nothing AndAlso kind <> CurveTickKind.SnapValue AndAlso Not IsLabelSpacingOk(anchor, placedLabels) Then Return
+
+        args.Display.Draw2dText(tickLabel, col, anchor, True, 10)
+        If placedLabels IsNot Nothing Then placedLabels.Add(anchor)
+    End Sub
+
+    Private Shared Function IsLabelSpacingOk(anchor As Rhino.Geometry.Point2d, placed As List(Of Rhino.Geometry.Point2d)) As Boolean
+        If placed Is Nothing OrElse placed.Count = 0 Then Return True
+        Dim minDist2 As Double = RulerMinLabelSpacingPx * RulerMinLabelSpacingPx
+        For Each p As Rhino.Geometry.Point2d In placed
+            Dim dx As Double = anchor.X - p.X
+            Dim dy As Double = anchor.Y - p.Y
+            If dx * dx + dy * dy < minDist2 Then Return False
+        Next
+        Return True
     End Function
+
+    Private Shared Function RulerLabelAnchor(sp As Rhino.Geometry.Point2d, nx As Double, ny As Double, tx As Double, ty As Double, halfLenPx As Single) As Rhino.Geometry.Point2d
+        Return New Rhino.Geometry.Point2d(sp.X + nx * (halfLenPx + 12.0R) + tx * 5.0R,
+                                          sp.Y + ny * (halfLenPx + 12.0R) + ty * 5.0R)
+    End Function
+
+    Private Shared Function SnapLabelAnchor(sp As Rhino.Geometry.Point2d, nx As Double, ny As Double, tx As Double, ty As Double, halfLenPx As Single) As Rhino.Geometry.Point2d
+        Return New Rhino.Geometry.Point2d(sp.X + nx * (halfLenPx + 14.0R) + tx * 6.0R,
+                                          sp.Y + ny * (halfLenPx + 14.0R) + ty * 6.0R)
+    End Function
+
+    Private Shared Function DecimalsForStep(stepVal As Double) As Integer
+        If stepVal <= 0 OrElse Double.IsNaN(stepVal) OrElse Double.IsInfinity(stepVal) Then Return 3
+        If stepVal >= 1.0R Then Return 0
+        Return Math.Min(12, Math.Max(0, CInt(Math.Ceiling(-Math.Log10(stepVal) - 0.000001R))))
+    End Function
+
+    Private Shared Function FormatDisplayValue(v As Double, displayStep As Double) As String
+        Return v.ToString("F" & DecimalsForStep(displayStep).ToString(), Globalization.CultureInfo.InvariantCulture)
+    End Function
+
+    ''' <summary>Decimals for labels at the current zoom level (follows ruler minor step).</summary>
+    Private Function TryGetViewportLabelStep(index As Integer, vp As RhinoViewport, ByRef minorStep As Double, ByRef majorLabelStep As Double) As Boolean
+        minorStep = 0
+        majorLabelStep = 0
+        Dim majorEvery As Integer
+        If Not TryComputeRulerStep(index, vp, minorStep, majorEvery) Then Return False
+        majorLabelStep = minorStep * majorEvery
+        Return True
+    End Function
+
+    Private Function FormatViewportValue(index As Integer, vp As RhinoViewport, v As Double) As String
+        Dim minorStep As Double
+        Dim majorLabelStep As Double
+        If TryGetViewportLabelStep(index, vp, minorStep, majorLabelStep) Then
+            Return FormatDisplayValue(v, minorStep)
+        End If
+        Return v.ToString("G9", Globalization.CultureInfo.InvariantCulture)
+    End Function
+
+    ''' <summary>Hide ruler labels only when they would duplicate a snap tick label.</summary>
+    Private Function ShouldDrawRulerLabel(args As IGH_PreviewArgs, crv As Curve, index As Integer, tNorm As Double,
+                                            stepVal As Double, labelStep As Double) As Boolean
+        If SnapParamsForCurve(index).Count = 0 Then Return True
+
+        Dim v As Double = DisplayValueAtNormalized(index, tNorm)
+        Dim valueTol As Double = Math.Max(stepVal * 0.3R, labelStep * 0.15R)
+        Dim clear2 As Double = SnapLabelClearancePx * SnapLabelClearancePx
+
+        Dim pt As Point3d = crv.PointAt(crv.Domain.ParameterAt(Math.Max(0.0R, Math.Min(1.0R, tNorm))))
+        If Not pt.IsValid Then Return True
+        Dim sp As Rhino.Geometry.Point2d = args.Viewport.WorldToClient(pt)
+
+        For Each ts As Double In SnapParamsForCurve(index)
+            Dim snapV As Double = DisplayValueAtNormalized(index, ts)
+            If Math.Abs(v - snapV) <= valueTol Then Return False
+
+            Dim snapPt As Point3d = crv.PointAt(crv.Domain.ParameterAt(ts))
+            If Not snapPt.IsValid Then Continue For
+            Dim snapSp As Rhino.Geometry.Point2d = args.Viewport.WorldToClient(snapPt)
+            Dim dx As Double = snapSp.X - sp.X
+            Dim dy As Double = snapSp.Y - sp.Y
+            If dx * dx + dy * dy <= clear2 AndAlso Math.Abs(v - snapV) < labelStep * 0.55R Then Return False
+        Next
+        Return True
+    End Function
+
+    ''' <summary>Equal-division ruler ticks that densify as the view zooms in; labels on major ticks when selected.</summary>
+    Private Sub DrawRulerTicks(args As IGH_PreviewArgs, index As Integer, crv As Curve, col As Color, selected As Boolean,
+                               placedLabels As List(Of Rhino.Geometry.Point2d))
+        Dim stepVal As Double
+        Dim majorEvery As Integer
+        If Not TryComputeRulerStep(index, args.Viewport, stepVal, majorEvery) Then Return
+
+        Dim tVisLo As Double, tVisHi As Double
+        If Not TryVisibleNormalizedRange(crv, args.Viewport, tVisLo, tVisHi) Then Return
+
+        Dim d0 As Double = DisplayValueAtNormalized(index, 0.0R)
+        Dim d1 As Double = DisplayValueAtNormalized(index, 1.0R)
+        Dim lo As Double = Math.Min(d0, d1)
+        Dim hi As Double = Math.Max(d0, d1)
+
+        Dim dVisLo As Double = DisplayValueAtNormalized(index, tVisLo)
+        Dim dVisHi As Double = DisplayValueAtNormalized(index, tVisHi)
+        Dim drawLo As Double = Math.Min(dVisLo, dVisHi) - stepVal * 2.0R
+        Dim drawHi As Double = Math.Max(dVisLo, dVisHi) + stepVal * 2.0R
+        drawLo = Math.Max(lo, drawLo)
+        drawHi = Math.Min(hi, drawHi)
+
+        Dim n0 As Long = 0
+        Dim n1 As Long = -1
+        Dim labelStep As Double = stepVal * majorEvery
+        Dim attempts As Integer = 0
+        Do
+            n0 = CLng(Math.Ceiling(drawLo / stepVal - 0.000001R))
+            n1 = CLng(Math.Floor(drawHi / stepVal + 0.000001R))
+            If n1 < n0 Then Return
+            If n1 - n0 + 1 <= RulerMaxTickCount Then Exit Do
+            stepVal = SnapRulerStepUp(stepVal * 1.05R)
+            ApplyRulerMajorEvery(stepVal, stepVal, majorEvery)
+            labelStep = stepVal * majorEvery
+            attempts += 1
+        Loop While attempts < 24
+        If n1 - n0 + 1 > RulerMaxTickCount Then Return
+
+        For n As Long = n0 To n1
+            Dim v As Double = n * stepVal
+            Dim t As Double
+            If Not TryNormalizedFromDisplayValueUnclamped(index, v, t) Then Continue For
+            If t < 0.002R OrElse t > 0.998R Then Continue For
+            If Not IsCurvePointNearViewport(args.Viewport, crv, t) Then Continue For
+
+            Dim isMajor As Boolean = (((n Mod majorEvery) + majorEvery) Mod majorEvery = 0)
+            Dim lbl As String = Nothing
+            If isMajor AndAlso selected AndAlso ShouldDrawRulerLabel(args, crv, index, t, stepVal, labelStep) Then
+                lbl = FormatDisplayValue(v, labelStep)
+            End If
+            DrawCurveTick(args, crv, t, If(isMajor, CurveTickKind.Major, CurveTickKind.Minor), col, lbl, placedLabels)
+        Next
+    End Sub
 
     Public Overrides Sub DrawViewportWires(args As IGH_PreviewArgs)
         If Curves.Count = 0 Then Return
@@ -617,16 +1067,29 @@ Public Class CurveSliderComp
             Dim crv As Curve = Curves(i)
             If crv Is Nothing Then Continue For
 
-            Dim startLabel As String = If(selected, FormatTickValue(DisplayValueAtNormalized(i, 0.0R)), Nothing)
-            DrawCurveTick(args, crv, 0.0R, 8.0R, col, 2, startLabel)
+            Dim placedLabels As New List(Of Rhino.Geometry.Point2d)
+            Dim stepVal As Double = 0
+            Dim majorEvery As Integer = 10
+            TryComputeRulerStep(i, args.Viewport, stepVal, majorEvery)
+            Dim labelStep As Double = stepVal * majorEvery
 
-            Dim endLabel As String = If(selected, FormatTickValue(DisplayValueAtNormalized(i, 1.0R)), Nothing)
-            DrawCurveTick(args, crv, 1.0R, 8.0R, col, 2, endLabel)
+            Dim startLabel As String = Nothing
+            If selected AndAlso ShouldDrawRulerLabel(args, crv, i, 0.0R, stepVal, labelStep) Then
+                startLabel = FormatViewportValue(i, args.Viewport, DisplayValueAtNormalized(i, 0.0R))
+            End If
+            DrawCurveTick(args, crv, 0.0R, CurveTickKind.EndCap, col, startLabel, placedLabels)
 
-            ' Snap value markers (shorter than the end ticks).
+            Dim endLabel As String = Nothing
+            If selected AndAlso ShouldDrawRulerLabel(args, crv, i, 1.0R, stepVal, labelStep) Then
+                endLabel = FormatViewportValue(i, args.Viewport, DisplayValueAtNormalized(i, 1.0R))
+            End If
+            DrawCurveTick(args, crv, 1.0R, CurveTickKind.EndCap, col, endLabel, placedLabels)
+
+            DrawRulerTicks(args, i, crv, col, selected, placedLabels)
+
             For Each ts As Double In SnapParamsForCurve(i)
-                Dim snapLbl As String = If(selected, FormatTickValue(DisplayValueAtNormalized(i, ts)), Nothing)
-                DrawCurveTick(args, crv, ts, 4.0R, col, 1, snapLbl)
+                Dim snapLbl As String = If(selected, FormatViewportValue(i, args.Viewport, DisplayValueAtNormalized(i, ts)), Nothing)
+                DrawCurveTick(args, crv, ts, CurveTickKind.SnapValue, col, snapLbl, placedLabels)
             Next
 
             Dim pt As Point3d = If(i < Points.Count, Points(i), Point3d.Unset)
@@ -635,7 +1098,7 @@ Public Class CurveSliderComp
             args.Display.DrawPoint(pt, PointStyle.RoundControlPoint, 5, col)
 
             Dim v As Double = DisplayValue(i)
-            Dim label As String = v.ToString("0.###", Globalization.CultureInfo.InvariantCulture)
+            Dim label As String = FormatViewportValue(i, args.Viewport, v)
             Dim screenPt As Rhino.Geometry.Point2d = args.Viewport.WorldToClient(pt)
             args.Display.Draw2dText(label, col, New Rhino.Geometry.Point2d(screenPt.X, screenPt.Y - 14.0R), True, 14)
         Next
@@ -874,7 +1337,10 @@ Public Class CurveSliderMouse
 
         Dim t As Double
         If TryParamFromViewportRay(Comp.Curves(_dragIndex), e.View, e.ViewportPoint, t) Then
-            t = ApplySnapIfClose(_dragIndex, t, e.View)
+            Dim snapped As Boolean = False
+            t = ApplySnapIfClose(_dragIndex, t, e.View, snapped)
+            ' No explicit snap value nearby: quantize to the current ruler step, so precision follows zoom.
+            If Not snapped Then t = Comp.QuantizeToRulerStep(_dragIndex, t, e.View)
             Comp.DragSliderParam(_dragIndex, t)
             Try
                 Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
@@ -888,7 +1354,8 @@ Public Class CurveSliderMouse
     Private Const SnapRadiusPx As Double = 8.0R
 
     ''' <summary>Stick the drag parameter to the nearest snap value when within the pixel radius.</summary>
-    Private Function ApplySnapIfClose(index As Integer, t As Double, view As Rhino.Display.RhinoView) As Double
+    Private Function ApplySnapIfClose(index As Integer, t As Double, view As Rhino.Display.RhinoView, ByRef snapped As Boolean) As Double
+        snapped = False
         If Comp Is Nothing OrElse view Is Nothing Then Return t
         Dim snaps As List(Of Double) = Comp.SnapParamsForCurve(index)
         If snaps.Count = 0 Then Return t
@@ -912,7 +1379,10 @@ Public Class CurveSliderMouse
                 bestT = ts
             End If
         Next
-        If bestDist <= SnapRadiusPx * SnapRadiusPx Then Return bestT
+        If bestDist <= SnapRadiusPx * SnapRadiusPx Then
+            snapped = True
+            Return bestT
+        End If
         Return t
     End Function
 
