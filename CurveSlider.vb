@@ -125,7 +125,7 @@ Public Class CurveSliderComp
         snapVals.ToolTipText = "Adds an S input (list of values in the current display units): dragging sticks to those values, shown as short ticks on the curve."
 
         Dim snapTicks As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Snapping ticks", AddressOf Menu_SnappingTicks, True, Me.SnappingTicks)
-        snapTicks.ToolTipText = "While dragging, stick the slider to the dynamic ruler tick steps (zoom-adaptive). Off by default: the point glides freely along the curve."
+        snapTicks.ToolTipText = "While dragging, stick the slider to tick steps. Adds a T input for a fixed step (e.g. 5 → 0,5,10…); leave T empty to snap to the zoom-adaptive ruler."
 
         Menu_AppendSeparator(menu)
 
@@ -166,6 +166,8 @@ Public Class CurveSliderComp
     Private Sub Menu_SnappingTicks()
         RecordUndoEvent("Curve Slider Snapping Ticks", New CurveSliderUndo(Me))
         SnappingTicks = Not SnappingTicks
+        SyncOptionalInputs()
+        Me.ExpireSolution(True)
         Try
             Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
         Catch
@@ -210,13 +212,25 @@ Public Class CurveSliderComp
         Return FindInputIndexByNick("S")
     End Function
 
-    ''' <summary>Register/unregister the optional D (domain) and S (snap values) inputs to match the menu flags. Order: C, D, S.</summary>
+    Private Function FindTickStepInputIndex() As Integer
+        Return FindInputIndexByNick("T")
+    End Function
+
+    ''' <summary>Register/unregister optional D, T and S inputs to match menu flags. Order: C, D, T, S.</summary>
     Friend Sub SyncOptionalInputs()
         Dim changed As Boolean = False
 
         Dim dIx As Integer = FindDomainInputIndex()
         If Not CustomDomain AndAlso dIx >= 0 Then
             Dim p As IGH_Param = Me.Params.Input(dIx)
+            p.RemoveAllSources()
+            Me.Params.UnregisterInputParameter(p)
+            changed = True
+        End If
+
+        Dim tIx As Integer = FindTickStepInputIndex()
+        If Not SnappingTicks AndAlso tIx >= 0 Then
+            Dim p As IGH_Param = Me.Params.Input(tIx)
             p.RemoveAllSources()
             Me.Params.UnregisterInputParameter(p)
             changed = True
@@ -238,8 +252,21 @@ Public Class CurveSliderComp
                 .Description = "Custom value domain for the slider (values remapped from the curve's 0-1).",
                 .Access = GH_ParamAccess.item
             }
-            Dim insertAt As Integer = If(FindSnapInputIndex() >= 0, FindSnapInputIndex(), Me.Params.Input.Count)
+            Dim insertAt As Integer = OptionalInputInsertIndex(FindTickStepInputIndex(), FindSnapInputIndex())
             Me.Params.RegisterInputParam(pd, insertAt)
+            changed = True
+        End If
+
+        If SnappingTicks AndAlso FindTickStepInputIndex() < 0 Then
+            Dim pt As New Grasshopper.Kernel.Parameters.Param_Number With {
+                .Optional = True,
+                .Name = "Tick step",
+                .NickName = "T",
+                .Description = "Fixed tick step in display units (e.g. 5 → snap to 0,5,10…; 0.1 → 0,0.1,0.2…). Leave empty to use zoom-adaptive ruler ticks.",
+                .Access = GH_ParamAccess.item
+            }
+            Dim insertAt As Integer = OptionalInputInsertIndex(-1, FindSnapInputIndex())
+            Me.Params.RegisterInputParam(pt, insertAt)
             changed = True
         End If
 
@@ -257,6 +284,13 @@ Public Class CurveSliderComp
 
         If changed Then Me.Params.OnParametersChanged()
     End Sub
+
+    ''' <summary>Insert index for an optional input, keeping order D → T → S after C.</summary>
+    Private Function OptionalInputInsertIndex(beforeIx As Integer, beforeIx2 As Integer) As Integer
+        If beforeIx >= 0 Then Return beforeIx
+        If beforeIx2 >= 0 Then Return beforeIx2
+        Return Math.Max(1, Me.Params.Input.Count)
+    End Function
 
 #End Region
 
@@ -289,6 +323,9 @@ Public Class CurveSliderComp
 
     ''' <summary>Snap values from the S input this solve (in display units).</summary>
     Friend SnapDisplayValues As New List(Of Double)
+
+    ''' <summary>Fixed tick step from the T input this solve (display units); 0 = use zoom-adaptive ruler.</summary>
+    Friend SnapTickStep As Double = 0
 
     Friend SliderMouse As CurveSliderMouse
     Friend SliderTextBox As FormCurveSliderBox = Nothing
@@ -586,14 +623,33 @@ Public Class CurveSliderComp
         Return stepVal > 0
     End Function
 
-    ''' <summary>Quantize a normalized drag parameter to the current ruler step — precision follows zoom. Typed values stay exact.</summary>
+    Friend Function HasFixedSnapTickStep() As Boolean
+        Return SnappingTicks AndAlso SnapTickStep > 0 AndAlso Not Double.IsNaN(SnapTickStep) AndAlso Not Double.IsInfinity(SnapTickStep)
+    End Function
+
+    ''' <summary>Quantize display value to the nearest multiple of step anchored at zero.</summary>
+    Private Shared Function QuantizeDisplayValueToStep(v As Double, stepVal As Double) As Double
+        Return Math.Round(v / stepVal) * stepVal
+    End Function
+
+    ''' <summary>Quantize a normalized drag parameter to tick steps — fixed T input or zoom-adaptive ruler.</summary>
     Friend Function QuantizeToRulerStep(index As Integer, tNorm As Double, view As Rhino.Display.RhinoView) As Double
-        If view Is Nothing Then Return tNorm
-        Dim stepVal As Double
-        Dim majorEvery As Integer
-        If Not TryComputeRulerStep(index, view.ActiveViewport, stepVal, majorEvery) Then Return tNorm
+        If Not SnappingTicks Then Return tNorm
+
+        Dim stepVal As Double = 0
+        If HasFixedSnapTickStep() Then
+            stepVal = SnapTickStep
+        ElseIf view IsNot Nothing Then
+            Dim majorEvery As Integer
+            If Not TryComputeRulerStep(index, view.ActiveViewport, stepVal, majorEvery) Then Return tNorm
+        Else
+            Return tNorm
+        End If
+
+        If stepVal <= 0 Then Return tNorm
+
         Dim v As Double = DisplayValueAtNormalized(index, tNorm)
-        v = Math.Round(v / stepVal) * stepVal
+        v = QuantizeDisplayValueToStep(v, stepVal)
         Dim t As Double
         If Not TryNormalizedFromDisplayValueUnclamped(index, v, t) Then Return tNorm
         If Double.IsNaN(t) Then Return tNorm
@@ -620,7 +676,7 @@ Public Class CurveSliderComp
         PreserveChanges = newPreserve
         ProximityCache = newProximity
         ShowRealValue = newReal
-        Dim needSync As Boolean = (CustomDomain <> newCustomDomain) OrElse (SnapValues <> newSnapValues)
+        Dim needSync As Boolean = (CustomDomain <> newCustomDomain) OrElse (SnapValues <> newSnapValues) OrElse (SnappingTicks <> newSnappingTicks)
         CustomDomain = newCustomDomain
         SnapValues = newSnapValues
         SnappingTicks = newSnappingTicks
@@ -796,6 +852,17 @@ Public Class CurveSliderComp
                     For Each v As Double In vals
                         If Not Double.IsNaN(v) AndAlso Not Double.IsInfinity(v) Then SnapDisplayValues.Add(v)
                     Next
+                End If
+            End If
+        End If
+
+        SnapTickStep = 0
+        If SnappingTicks Then
+            Dim tIx As Integer = FindTickStepInputIndex()
+            If tIx >= 0 AndAlso Me.Params.Input(tIx).VolatileDataCount > 0 Then
+                Dim stepIn As Double
+                If DA.GetData(tIx, stepIn) AndAlso stepIn > 0 AndAlso Not Double.IsNaN(stepIn) AndAlso Not Double.IsInfinity(stepIn) Then
+                    SnapTickStep = stepIn
                 End If
             End If
         End If
@@ -976,9 +1043,16 @@ Public Class CurveSliderComp
     Private Function TryGetViewportLabelStep(index As Integer, vp As RhinoViewport, ByRef minorStep As Double, ByRef majorLabelStep As Double) As Boolean
         minorStep = 0
         majorLabelStep = 0
-        Dim majorEvery As Integer
-        If Not TryComputeRulerStep(index, vp, minorStep, majorEvery) Then Return False
-        majorLabelStep = minorStep * majorEvery
+        If HasFixedSnapTickStep() Then
+            minorStep = SnapTickStep
+            Dim majorEvery As Integer
+            ApplyRulerMajorEvery(SnapTickStep, minorStep, majorEvery)
+            majorLabelStep = minorStep * majorEvery
+            Return True
+        End If
+        Dim majorEveryDyn As Integer
+        If Not TryComputeRulerStep(index, vp, minorStep, majorEveryDyn) Then Return False
+        majorLabelStep = minorStep * majorEveryDyn
         Return True
     End Function
 
@@ -1023,7 +1097,12 @@ Public Class CurveSliderComp
                                placedLabels As List(Of Rhino.Geometry.Point2d))
         Dim stepVal As Double
         Dim majorEvery As Integer
-        If Not TryComputeRulerStep(index, args.Viewport, stepVal, majorEvery) Then Return
+        If HasFixedSnapTickStep() Then
+            stepVal = SnapTickStep
+            ApplyRulerMajorEvery(SnapTickStep, stepVal, majorEvery)
+        ElseIf Not TryComputeRulerStep(index, args.Viewport, stepVal, majorEvery) Then
+            Return
+        End If
 
         Dim tVisLo As Double, tVisHi As Double
         If Not TryVisibleNormalizedRange(crv, args.Viewport, tVisLo, tVisHi) Then Return
