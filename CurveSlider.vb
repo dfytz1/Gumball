@@ -124,6 +124,9 @@ Public Class CurveSliderComp
         Dim snapVals As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Snapping values", AddressOf Menu_SnapValues, True, Me.SnapValues)
         snapVals.ToolTipText = "Adds an S input (list of values in the current display units): dragging sticks to those values, shown as short ticks on the curve."
 
+        Dim snapTicks As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Snapping ticks", AddressOf Menu_SnappingTicks, True, Me.SnappingTicks)
+        snapTicks.ToolTipText = "While dragging, stick the slider to the dynamic ruler tick steps (zoom-adaptive). Off by default: the point glides freely along the curve."
+
         Menu_AppendSeparator(menu)
 
         Dim preserve As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Preserve changes", AddressOf Menu_PreserveChanges, True, Me.PreserveChanges)
@@ -158,6 +161,15 @@ Public Class CurveSliderComp
         SnapValues = Not SnapValues
         SyncOptionalInputs()
         Me.ExpireSolution(True)
+    End Sub
+
+    Private Sub Menu_SnappingTicks()
+        RecordUndoEvent("Curve Slider Snapping Ticks", New CurveSliderUndo(Me))
+        SnappingTicks = Not SnappingTicks
+        Try
+            Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
+        Catch
+        End Try
     End Sub
 
     Private Sub Menu_PreserveChanges()
@@ -261,6 +273,8 @@ Public Class CurveSliderComp
     Public CustomDomain As Boolean = False
     ''' <summary>Adds the S input; dragging sticks to those values, drawn as short ticks on the curve.</summary>
     Public SnapValues As Boolean = False
+    ''' <summary>While dragging, quantize to dynamic ruler tick steps. Off by default.</summary>
+    Public SnappingTicks As Boolean = False
 
     ''' <summary>Curves from the last solve (duplicates).</summary>
     Friend Curves As New List(Of Curve)
@@ -601,7 +615,7 @@ Public Class CurveSliderComp
     End Function
 
     Friend Sub SetStateFromUndo(newParams As List(Of Double), newPreserve As Boolean, newProximity As Boolean,
-                                newReal As Boolean, newCustomDomain As Boolean, newSnapValues As Boolean)
+                                newReal As Boolean, newCustomDomain As Boolean, newSnapValues As Boolean, newSnappingTicks As Boolean)
         SliderParams = New List(Of Double)(newParams)
         PreserveChanges = newPreserve
         ProximityCache = newProximity
@@ -609,6 +623,7 @@ Public Class CurveSliderComp
         Dim needSync As Boolean = (CustomDomain <> newCustomDomain) OrElse (SnapValues <> newSnapValues)
         CustomDomain = newCustomDomain
         SnapValues = newSnapValues
+        SnappingTicks = newSnappingTicks
         If needSync Then SyncOptionalInputs()
         CloseSliderTextBoxIfAny()
         Me.ExpireSolution(True)
@@ -1125,6 +1140,7 @@ Public Class CurveSliderComp
         writer.SetBoolean("CS_Real", ShowRealValue)
         writer.SetBoolean("CS_CustomDomain", CustomDomain)
         writer.SetBoolean("CS_Snap", SnapValues)
+        writer.SetBoolean("CS_SnapTicks", SnappingTicks)
         writer.SetInt32("CS_Count", SliderParams.Count)
         For i As Integer = 0 To SliderParams.Count - 1
             writer.SetDouble("CS_Param", i, SliderParams(i))
@@ -1152,6 +1168,10 @@ Public Class CurveSliderComp
         Dim snap As Boolean = False
         reader.TryGetBoolean("CS_Snap", snap)
         SnapValues = snap
+
+        Dim snapTicks As Boolean = False
+        reader.TryGetBoolean("CS_SnapTicks", snapTicks)
+        SnappingTicks = snapTicks
 
         ' Register the optional D/S inputs before MyBase.Read so archived param data/sources map onto them.
         SyncOptionalInputs()
@@ -1205,6 +1225,7 @@ Public Class CurveSliderUndo
     Private _real As Boolean
     Private _customDomain As Boolean
     Private _snapValues As Boolean
+    Private _snappingTicks As Boolean
 
     Sub New(owner As CurveSliderComp)
         _ownerId = owner.InstanceGuid
@@ -1214,6 +1235,7 @@ Public Class CurveSliderUndo
         _real = owner.ShowRealValue
         _customDomain = owner.CustomDomain
         _snapValues = owner.SnapValues
+        _snappingTicks = owner.SnappingTicks
     End Sub
 
     Protected Overrides Sub Internal_Undo(doc As GH_Document)
@@ -1233,13 +1255,15 @@ Public Class CurveSliderUndo
         Dim curReal As Boolean = comp.ShowRealValue
         Dim curCustom As Boolean = comp.CustomDomain
         Dim curSnap As Boolean = comp.SnapValues
-        comp.SetStateFromUndo(_params, _preserve, _proximity, _real, _customDomain, _snapValues)
+        Dim curSnapTicks As Boolean = comp.SnappingTicks
+        comp.SetStateFromUndo(_params, _preserve, _proximity, _real, _customDomain, _snapValues, _snappingTicks)
         _params = curParams
         _preserve = curPreserve
         _proximity = curProximity
         _real = curReal
         _customDomain = curCustom
         _snapValues = curSnap
+        _snappingTicks = curSnapTicks
     End Sub
 
 End Class
@@ -1339,8 +1363,8 @@ Public Class CurveSliderMouse
         If TryParamFromViewportRay(Comp.Curves(_dragIndex), e.View, e.ViewportPoint, t) Then
             Dim snapped As Boolean = False
             t = ApplySnapIfClose(_dragIndex, t, e.View, snapped)
-            ' No explicit snap value nearby: quantize to the current ruler step, so precision follows zoom.
-            If Not snapped Then t = Comp.QuantizeToRulerStep(_dragIndex, t, e.View)
+            ' Ruler tick quantization (optional); explicit S-input snap values always take priority.
+            If Not snapped AndAlso Comp.SnappingTicks Then t = Comp.QuantizeToRulerStep(_dragIndex, t, e.View)
             Comp.DragSliderParam(_dragIndex, t)
             Try
                 Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
