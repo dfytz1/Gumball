@@ -5,6 +5,7 @@ Imports System.Linq
 Imports System.Windows.Forms
 Imports Grasshopper
 Imports Grasshopper.Kernel
+Imports Grasshopper.Kernel.Data
 Imports Grasshopper.GUI.Canvas
 Imports Grasshopper.Kernel.Types
 Imports Rhino.Display
@@ -57,12 +58,12 @@ Public Class CurveSliderComp
     End Property
 
     Protected Overrides Sub RegisterInputParams(pManager As GH_Component.GH_InputParamManager)
-        pManager.AddCurveParameter("Curve", "C", "Curve(s) to place a slider point on.", GH_ParamAccess.list)
+        pManager.AddCurveParameter("Curve", "C", "Curve(s) to place a slider point on.", GH_ParamAccess.tree)
     End Sub
 
     Protected Overrides Sub RegisterOutputParams(pManager As GH_Component.GH_OutputParamManager)
-        pManager.AddPointParameter("Point", "P", "Slider point on each curve.", GH_ParamAccess.list)
-        pManager.AddNumberParameter("Value", "t", "Slider value per curve (normalized 0-1, real curve parameter, or custom-domain value per right-click settings).", GH_ParamAccess.list)
+        pManager.AddPointParameter("Point", "P", "Slider point on each curve.", GH_ParamAccess.tree)
+        pManager.AddNumberParameter("Value", "t", "Slider value per curve (normalized 0-1, real curve parameter, or custom-domain value per right-click settings).", GH_ParamAccess.tree)
     End Sub
 
     Public Overrides Sub CreateAttributes()
@@ -323,6 +324,8 @@ Public Class CurveSliderComp
 
     ''' <summary>Curves from the last solve (duplicates).</summary>
     Friend Curves As New List(Of Curve)
+    ''' <summary>Data tree path per curve (parallel to Curves).</summary>
+    Friend CurvePaths As New List(Of GH_Path)
     ''' <summary>Evaluated slider points from the last solve (parallel to Curves).</summary>
     Friend Points As New List(Of Point3d)
 
@@ -838,10 +841,39 @@ Public Class CurveSliderComp
         Return result
     End Function
 
+    Private Shared Sub BuildCurvesFromTree(curveData As GH_Structure(Of GH_Curve), newCurves As List(Of Curve), newPaths As List(Of GH_Path))
+        newCurves.Clear()
+        newPaths.Clear()
+        For Each path As GH_Path In curveData.Paths
+            For Each gc As GH_Curve In curveData.DataList(path)
+                If gc Is Nothing OrElse gc.Value Is Nothing Then
+                    newCurves.Add(Nothing)
+                Else
+                    newCurves.Add(gc.Value.DuplicateCurve())
+                End If
+                newPaths.Add(path)
+            Next
+        Next
+    End Sub
+
+    Private Sub SetOutputTrees(DA As IGH_DataAccess)
+        Dim outPts As New GH_Structure(Of GH_Point)
+        Dim outVals As New GH_Structure(Of GH_Number)
+        For i As Integer = 0 To Curves.Count - 1
+            Dim path As GH_Path = If(i < CurvePaths.Count, CurvePaths(i), New GH_Path(0))
+            Dim pt As Point3d = If(i < Points.Count, Points(i), Point3d.Unset)
+            outPts.Append(New GH_Point(pt), path)
+            outVals.Append(New GH_Number(DisplayValue(i)), path)
+        Next
+        DA.SetDataTree(0, outPts)
+        DA.SetDataTree(1, outVals)
+    End Sub
+
     Protected Overrides Sub SolveInstance(DA As IGH_DataAccess)
-        Dim inCurves As New List(Of Curve)
-        If Not DA.GetDataList(0, inCurves) Then
+        Dim curveData As New GH_Structure(Of GH_Curve)
+        If Not DA.GetDataTree(0, curveData) Then
             Curves.Clear()
+            CurvePaths.Clear()
             Points.Clear()
             CacheCurves = Nothing
             SyncMouse()
@@ -882,13 +914,8 @@ Public Class CurveSliderComp
         End If
 
         Dim newCurves As New List(Of Curve)
-        For Each c As Curve In inCurves
-            If c Is Nothing Then
-                newCurves.Add(Nothing)
-            Else
-                newCurves.Add(c.DuplicateCurve())
-            End If
-        Next
+        Dim newPaths As New List(Of GH_Path)
+        BuildCurvesFromTree(curveData, newCurves, newPaths)
 
         If CacheCurves Is Nothing Then
             CacheCurves = newCurves
@@ -902,6 +929,7 @@ Public Class CurveSliderComp
         End If
 
         Curves = newCurves
+        CurvePaths = newPaths
 
         While SliderParams.Count < Curves.Count
             SliderParams.Add(0.5R)
@@ -913,14 +941,11 @@ Public Class CurveSliderComp
         If EditIndex >= Curves.Count Then CloseSliderTextBoxIfAny()
 
         Points.Clear()
-        Dim outVals As New List(Of Double)(Curves.Count)
         For i As Integer = 0 To Curves.Count - 1
             Points.Add(PointOnCurveAtNormalized(Curves(i), SliderParams(i)))
-            outVals.Add(DisplayValue(i))
         Next
 
-        DA.SetDataList(0, Points)
-        DA.SetDataList(1, outVals)
+        SetOutputTrees(DA)
     End Sub
 
 #End Region
