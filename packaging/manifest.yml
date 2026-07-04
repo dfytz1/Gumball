@@ -1,11 +1,12 @@
 name: GhGumball
-version: 2.2.3
+version: 2.2.4
 authors:
   - GIA
 description: >
   Grasshopper viewport tools (Rhino 8): Gumball with ray-based osnap snapping to geometry (vertices, edges, faces),
-  Text Tag for clickable viewport labels, and Curve Slider with zoom-adaptive dynamic ruler ticks, optional snap-to-ticks dragging
-  with a T input for fixed tick steps, lock-unselected interaction mode, snap pins, custom domain, and preserve/proximity cache. Gumball also supports compound transform outputs and Shift+scale for uniform XYZ.
+  Text Tag for clickable viewport labels with optional Tx preset text and grafted-tree support,
+  Curve Slider with zoom-adaptive dynamic ruler ticks, optional snap-to-ticks dragging with a T input
+  for fixed tick steps, lock-unselected interaction mode, snap pins, custom domain, and preserve/proximity cache. Gumball also supports compound transform outputs and Shift+scale for uniform XYZ.
 url: "https://github.com/dfytz1/Gumball"
 icon: icon.png
 keywords:

@@ -5,6 +5,7 @@ Imports System.Linq
 Imports System.Windows.Forms
 Imports Grasshopper
 Imports Grasshopper.Kernel
+Imports Grasshopper.Kernel.Data
 Imports Grasshopper.GUI.Canvas
 Imports Grasshopper.Kernel.Types
 Imports Rhino.Display
@@ -66,11 +67,13 @@ Public Class TextTagComp
     End Property
 
     Protected Overrides Sub RegisterInputParams(pManager As GH_Component.GH_InputParamManager)
-        pManager.AddGeometryParameter("Location", "P", "Point (text faces camera) or plane (text drawn in plane) to place the tag.", GH_ParamAccess.list)
+        pManager.AddGeometryParameter("Location", "P", "Point (text faces camera) or plane (text drawn in plane) to place the tag.", GH_ParamAccess.tree)
         pManager.AddNumberParameter("Size", "S", "Text height in model units.", GH_ParamAccess.item, 1.0R)
         pManager.AddColourParameter("Colour", "C", "Dot and text colour.", GH_ParamAccess.item, Color.Black)
+        pManager.AddTextParameter("Text", "Tx", "Optional preset text per location (matches the location tree). Viewport edits override.", GH_ParamAccess.tree)
         pManager.Param(1).Optional = True
         pManager.Param(2).Optional = True
+        pManager.Param(3).Optional = True
     End Sub
 
     Protected Overrides Sub RegisterOutputParams(pManager As GH_Component.GH_OutputParamManager)
@@ -189,6 +192,7 @@ Public Class TextTagComp
     Public Sub Menu_ClearCache()
         RecordUndoEvent("Text Tag Clear Cache", New TextTagUndo(Me))
         Texts.Clear()
+        TextUserEdited.Clear()
         CloseTagTextBoxIfAny()
         Me.ClearData()
         Me.ExpireSolution(True)
@@ -247,6 +251,12 @@ Public Class TextTagComp
     ''' <summary>Entered text per item index (persisted in the GH file).</summary>
     Friend Texts As New List(Of String)
 
+    ''' <summary>True when the text at this index was set from the viewport (not driven by the Tx input).</summary>
+    Friend TextUserEdited As New List(Of Boolean)
+
+    ''' <summary>Data tree path per flattened slot (parallel to Slots).</summary>
+    Friend SlotPaths As New List(Of GH_Path)
+
     ''' <summary>Keep texts when upstream locations change (on by default).</summary>
     Public PreserveChanges As Boolean = True
 
@@ -279,10 +289,11 @@ Public Class TextTagComp
     ''' <summary>Slot index currently being edited in the floating text box (-1 = none).</summary>
     Friend EditIndex As Integer = -1
 
-    Friend Sub SetTagTextsFromUndo(newTexts As List(Of String), newPreserve As Boolean, newProximity As Boolean,
+    Friend Sub SetTagTextsFromUndo(newTexts As List(Of String), newEdited As List(Of Boolean), newPreserve As Boolean, newProximity As Boolean,
                                    newHAlign As Rhino.DocObjects.TextHorizontalAlignment, newVAlign As Rhino.DocObjects.TextVerticalAlignment,
                                    newJustifyLines As Boolean, newLockUnselected As Boolean)
         Texts = New List(Of String)(newTexts)
+        TextUserEdited = New List(Of Boolean)(newEdited)
         PreserveChanges = newPreserve
         ProximityCache = newProximity
         HorizontalAlign = newHAlign
@@ -324,6 +335,10 @@ Public Class TextTagComp
         End If
         RecordUndoEvent("Text Tag Edit", New TextTagUndo(Me))
         Texts(index) = clean
+        While TextUserEdited.Count < Texts.Count
+            TextUserEdited.Add(False)
+        End While
+        TextUserEdited(index) = True
         EditIndex = -1
         Me.ExpireSolution(True)
         Try
@@ -399,10 +414,153 @@ Public Class TextTagComp
         Return result
     End Function
 
+    ''' <summary>Greedy nearest-location matching for boolean flags (parallel to RemapTextsByProximity).</summary>
+    Private Shared Function RemapEditedByProximity(oldSlots As List(Of TextTagSlot), oldEdited As List(Of Boolean), newSlots As List(Of TextTagSlot)) As List(Of Boolean)
+        Dim result As New List(Of Boolean)(newSlots.Count)
+        For i As Integer = 0 To newSlots.Count - 1
+            result.Add(False)
+        Next
+
+        Dim pairs As New List(Of Tuple(Of Double, Integer, Integer))
+        Dim nOld As Integer = Math.Min(oldSlots.Count, oldEdited.Count)
+        For oi As Integer = 0 To nOld - 1
+            If Not oldEdited(oi) Then Continue For
+            For ni As Integer = 0 To newSlots.Count - 1
+                pairs.Add(Tuple.Create(oldSlots(oi).Location.DistanceToSquared(newSlots(ni).Location), oi, ni))
+            Next
+        Next
+        pairs.Sort(Function(x, y) x.Item1.CompareTo(y.Item1))
+
+        Dim usedOld As New HashSet(Of Integer)
+        Dim usedNew As New HashSet(Of Integer)
+        For Each p As Tuple(Of Double, Integer, Integer) In pairs
+            If usedOld.Contains(p.Item2) OrElse usedNew.Contains(p.Item3) Then Continue For
+            result(p.Item3) = True
+            usedOld.Add(p.Item2)
+            usedNew.Add(p.Item3)
+        Next
+        Return result
+    End Function
+
+    Private Shared Function TryParseLocationGoo(g As IGH_GeometricGoo, ByRef slot As TextTagSlot) As Boolean
+        slot = New TextTagSlot
+        If g Is Nothing Then Return False
+
+        Dim ghPl As GH_Plane = TryCast(g, GH_Plane)
+        If ghPl IsNot Nothing AndAlso ghPl.IsValid Then
+            slot.Plane = ghPl.Value
+            slot.Location = ghPl.Value.Origin
+            slot.HasPlane = True
+            Return True
+        End If
+
+        Dim pt As Point3d = Point3d.Unset
+        If GH_Convert.ToPoint3d(g, pt, GH_Conversion.Both) AndAlso pt.IsValid Then
+            slot.Location = pt
+            slot.Plane = Plane.Unset
+            slot.HasPlane = False
+            Return True
+        End If
+
+        Dim pl As New Plane
+        If GH_Convert.ToPlane(g, pl, GH_Conversion.Both) AndAlso pl.IsValid Then
+            slot.Plane = pl
+            slot.Location = pl.Origin
+            slot.HasPlane = True
+            Return True
+        End If
+
+        Return False
+    End Function
+
+    Private Shared Function TextFromStringItem(gs As GH_String) As String
+        If gs Is Nothing Then Return String.Empty
+        Return If(gs.Value, String.Empty)
+    End Function
+
+    Private Function HasTextInputConnected() As Boolean
+        If Me.Params.Input.Count < 4 Then Return False
+        Return Me.Params.Input(3).SourceCount > 0
+    End Function
+
+    Private Shared Sub BuildSlotsFromTree(locData As GH_Structure(Of IGH_GeometricGoo), newSlots As List(Of TextTagSlot), newPaths As List(Of GH_Path))
+        newSlots.Clear()
+        newPaths.Clear()
+        For Each path As GH_Path In locData.Paths
+            For Each g As IGH_GeometricGoo In locData.DataList(path)
+                Dim slot As TextTagSlot
+                If TryParseLocationGoo(g, slot) Then
+                    newSlots.Add(slot)
+                    newPaths.Add(path)
+                End If
+            Next
+        Next
+    End Sub
+
+    Private Shared Sub BuildInputTextsFromTrees(locData As GH_Structure(Of IGH_GeometricGoo), textData As GH_Structure(Of GH_String), result As List(Of String))
+        result.Clear()
+        Dim broadcast As String = String.Empty
+        Dim broadcastSet As Boolean = False
+        If textData IsNot Nothing AndAlso textData.DataCount = 1 AndAlso textData.Paths.Count > 0 Then
+            broadcast = TextFromStringItem(textData.DataList(textData.Paths(0))(0))
+            broadcastSet = True
+        End If
+
+        For Each path As GH_Path In locData.Paths
+            Dim locBranch = locData.DataList(path)
+            Dim textBranch As IList(Of GH_String) = Nothing
+            If textData IsNot Nothing AndAlso textData.PathExists(path) Then
+                textBranch = textData.DataList(path)
+            End If
+            For j As Integer = 0 To locBranch.Count - 1
+                Dim g As IGH_GeometricGoo = locBranch(j)
+                Dim slot As TextTagSlot
+                If Not TryParseLocationGoo(g, slot) Then Continue For
+
+                Dim txt As String = String.Empty
+                If textBranch IsNot Nothing AndAlso j < textBranch.Count Then
+                    txt = TextFromStringItem(textBranch(j))
+                ElseIf broadcastSet Then
+                    txt = broadcast
+                End If
+                result.Add(txt)
+            Next
+        Next
+    End Sub
+
+    Private Sub ApplyInputTexts(inputTexts As List(Of String))
+        If Not HasTextInputConnected() Then Return
+
+        While TextUserEdited.Count < Slots.Count
+            TextUserEdited.Add(False)
+        End While
+        While Texts.Count < Slots.Count
+            Texts.Add(String.Empty)
+        End While
+
+        For i As Integer = 0 To Slots.Count - 1
+            If i < TextUserEdited.Count AndAlso TextUserEdited(i) Then Continue For
+            Dim v As String = String.Empty
+            If inputTexts IsNot Nothing AndAlso i < inputTexts.Count Then v = inputTexts(i)
+            Texts(i) = v
+        Next
+    End Sub
+
+    Private Sub SetTextOutputTree(DA As IGH_DataAccess)
+        Dim outData As New GH_Structure(Of GH_String)
+        For i As Integer = 0 To Slots.Count - 1
+            Dim path As GH_Path = If(i < SlotPaths.Count, SlotPaths(i), New GH_Path(0))
+            Dim txt As String = If(i < Texts.Count, Texts(i), String.Empty)
+            outData.Append(New GH_String(txt), path)
+        Next
+        DA.SetDataTree(0, outData)
+    End Sub
+
     Protected Overrides Sub SolveInstance(DA As IGH_DataAccess)
-        Dim goos As New List(Of IGH_GeometricGoo)
-        If Not DA.GetDataList(0, goos) Then
+        Dim locData As New GH_Structure(Of IGH_GeometricGoo)
+        If Not DA.GetDataTree(0, locData) Then
             Slots.Clear()
+            SlotPaths.Clear()
             CacheSlots = Nothing
             SyncMouse()
             Exit Sub
@@ -418,64 +576,53 @@ Public Class TextTagComp
         TagColour = col
 
         Dim newSlots As New List(Of TextTagSlot)
-        For Each g As IGH_GeometricGoo In goos
-            If g Is Nothing Then Continue For
-            Dim slot As New TextTagSlot
+        Dim newPaths As New List(Of GH_Path)
+        BuildSlotsFromTree(locData, newSlots, newPaths)
+        Dim skipped As Integer = locData.DataCount - newSlots.Count
+        If skipped > 0 Then
+            Me.AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, skipped.ToString() & " location(s) could not be read as a point or plane and were skipped.")
+        End If
 
-            Dim ghPl As GH_Plane = TryCast(g, GH_Plane)
-            If ghPl IsNot Nothing AndAlso ghPl.IsValid Then
-                slot.Plane = ghPl.Value
-                slot.Location = ghPl.Value.Origin
-                slot.HasPlane = True
-                newSlots.Add(slot)
-                Continue For
+        Dim inputTexts As New List(Of String)
+        If HasTextInputConnected() Then
+            Dim textData As New GH_Structure(Of GH_String)
+            If DA.GetDataTree(3, textData) Then
+                BuildInputTextsFromTrees(locData, textData, inputTexts)
             End If
-
-            Dim pt As Point3d = Point3d.Unset
-            If GH_Convert.ToPoint3d(g, pt, GH_Conversion.Both) AndAlso pt.IsValid Then
-                slot.Location = pt
-                slot.Plane = Plane.Unset
-                slot.HasPlane = False
-                newSlots.Add(slot)
-                Continue For
-            End If
-
-            Dim pl As New Plane
-            If GH_Convert.ToPlane(g, pl, GH_Conversion.Both) AndAlso pl.IsValid Then
-                slot.Plane = pl
-                slot.Location = pl.Origin
-                slot.HasPlane = True
-                newSlots.Add(slot)
-                Continue For
-            End If
-
-            Me.AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "A location could not be read as a point or plane and was skipped.")
-        Next
+        End If
 
         If CacheSlots Is Nothing Then
             CacheSlots = newSlots
         ElseIf Not SlotsEqual(CacheSlots, newSlots) Then
             If ProximityCache Then
                 Texts = RemapTextsByProximity(CacheSlots, Texts, newSlots)
+                TextUserEdited = RemapEditedByProximity(CacheSlots, TextUserEdited, newSlots)
             ElseIf Not PreserveChanges Then
                 Texts.Clear()
+                TextUserEdited.Clear()
             End If
             CacheSlots = newSlots
         End If
 
         Slots = newSlots
+        SlotPaths = newPaths
 
         While Texts.Count < Slots.Count
             Texts.Add(String.Empty)
         End While
-        ' With preserve on, keep surplus texts so a list that shrinks and grows back recovers its entries.
+        While TextUserEdited.Count < Slots.Count
+            TextUserEdited.Add(False)
+        End While
         If Not PreserveChanges AndAlso Texts.Count > Slots.Count Then
             Texts.RemoveRange(Slots.Count, Texts.Count - Slots.Count)
+            TextUserEdited.RemoveRange(Slots.Count, TextUserEdited.Count - Slots.Count)
         End If
+
+        ApplyInputTexts(inputTexts)
 
         If EditIndex >= Slots.Count Then CloseTagTextBoxIfAny()
 
-        DA.SetDataList(0, Texts.Take(Slots.Count).ToList())
+        SetTextOutputTree(DA)
     End Sub
 
 #End Region
@@ -687,6 +834,10 @@ Public Class TextTagComp
         For i As Integer = 0 To Texts.Count - 1
             writer.SetString("TT_Text", i, If(Texts(i), String.Empty))
         Next
+        writer.SetInt32("TT_EditedCount", TextUserEdited.Count)
+        For i As Integer = 0 To TextUserEdited.Count - 1
+            writer.SetBoolean("TT_Edited", i, TextUserEdited(i))
+        Next
         Return MyBase.Write(writer)
     End Function
 
@@ -718,12 +869,26 @@ Public Class TextTagComp
         LockUnselected = lockUnsel
 
         Texts.Clear()
+        TextUserEdited.Clear()
         Dim n As Integer = 0
         If reader.TryGetInt32("TT_Count", n) Then
             For i As Integer = 0 To n - 1
                 Dim s As String = String.Empty
                 reader.TryGetString("TT_Text", i, s)
                 Texts.Add(If(s, String.Empty))
+            Next
+        End If
+
+        Dim nEdited As Integer = 0
+        If reader.TryGetInt32("TT_EditedCount", nEdited) Then
+            For i As Integer = 0 To nEdited - 1
+                Dim edited As Boolean = False
+                reader.TryGetBoolean("TT_Edited", i, edited)
+                TextUserEdited.Add(edited)
+            Next
+        Else
+            For Each s As String In Texts
+                TextUserEdited.Add(Not String.IsNullOrEmpty(s))
             Next
         End If
         Return MyBase.Read(reader)
@@ -761,6 +926,7 @@ Public Class TextTagUndo
 
     Private ReadOnly _ownerId As Guid
     Private _texts As List(Of String)
+    Private _edited As List(Of Boolean)
     Private _preserve As Boolean
     Private _proximity As Boolean
     Private _hAlign As Rhino.DocObjects.TextHorizontalAlignment
@@ -771,6 +937,7 @@ Public Class TextTagUndo
     Sub New(owner As TextTagComp)
         _ownerId = owner.InstanceGuid
         _texts = New List(Of String)(owner.Texts)
+        _edited = New List(Of Boolean)(owner.TextUserEdited)
         _preserve = owner.PreserveChanges
         _proximity = owner.ProximityCache
         _hAlign = owner.HorizontalAlign
@@ -791,14 +958,16 @@ Public Class TextTagUndo
         Dim comp As TextTagComp = TryCast(doc.FindObject(_ownerId, True), TextTagComp)
         If comp Is Nothing Then Return
         Dim curTexts As New List(Of String)(comp.Texts)
+        Dim curEdited As New List(Of Boolean)(comp.TextUserEdited)
         Dim curPreserve As Boolean = comp.PreserveChanges
         Dim curProximity As Boolean = comp.ProximityCache
         Dim curH As Rhino.DocObjects.TextHorizontalAlignment = comp.HorizontalAlign
         Dim curV As Rhino.DocObjects.TextVerticalAlignment = comp.VerticalAlign
         Dim curJustify As Boolean = comp.JustifyMultilineLines
         Dim curLockUnselected As Boolean = comp.LockUnselected
-        comp.SetTagTextsFromUndo(_texts, _preserve, _proximity, _hAlign, _vAlign, _justifyLines, _lockUnselected)
+        comp.SetTagTextsFromUndo(_texts, _edited, _preserve, _proximity, _hAlign, _vAlign, _justifyLines, _lockUnselected)
         _texts = curTexts
+        _edited = curEdited
         _preserve = curPreserve
         _proximity = curProximity
         _hAlign = curH
