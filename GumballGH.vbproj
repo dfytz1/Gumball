@@ -15,7 +15,7 @@
     <LangVersion>latest</LangVersion>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <NoWarn>42016,41999,42017,42018,42019,42032,42036,42020,42021,42022,NU1701,NETSDK1086</NoWarn>
-    <Version>2.2.5</Version>
+    <Version>2.2.6</Version>
     <Title>GumballGH</Title>
     <Authors>GIA</Authors>
     <Company>GIA</Company>
@@ -38,6 +38,9 @@
   <ItemGroup>
     <EmbeddedResource Include="Resources\GumballIcon.png">
       <LogicalName>GumballGH.GumballIcon.png</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Resources\GeometrySelectIcon.png">
+      <LogicalName>GumballGH.GeometrySelectIcon.png</LogicalName>
     </EmbeddedResource>
     <EmbeddedResource Remove="My Project\Resources.resx" />
     <Compile Remove="My Project\Resources.Designer.vb" />
