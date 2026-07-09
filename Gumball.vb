@@ -458,6 +458,36 @@ Public Class GumballComp
         Return SlotSettings(slot).ApplyToAll
     End Function
 
+    ''' <summary>Slots that receive the same transform when <paramref name="gripIndex"/> is dragged with apply-to-all active.</summary>
+    Friend Function TransformTargetSlots(gripIndex As Integer) As Integer()
+        If MyGumball Is Nothing OrElse gripIndex < 0 OrElse gripIndex >= MyGumball.Count Then
+            Return New Integer() {}
+        End If
+        If ModeValueType = 1 Then
+            Dim all(MyGumball.Count - 1) As Integer
+            For i As Integer = 0 To MyGumball.Count - 1
+                all(i) = i
+            Next
+            Return all
+        End If
+        If Not SlotAppliesToAll(gripIndex) Then Return New Integer() {gripIndex}
+        If _slotPaths Is Nothing OrElse gripIndex >= _slotPaths.Length Then Return New Integer() {gripIndex}
+        Dim groupPath As GH_Path = _slotPaths(gripIndex)
+        Dim slots As New List(Of Integer)
+        For i As Integer = 0 To Math.Min(MyGumball.Count, _slotPaths.Length) - 1
+            If _slotPaths(i).Equals(groupPath) Then slots.Add(i)
+        Next
+        If slots.Count = 0 Then Return New Integer() {gripIndex}
+        Return slots.ToArray()
+    End Function
+
+    Friend Function IsTransformGroupMember(slot As Integer, gripIndex As Integer) As Boolean
+        For Each i As Integer In TransformTargetSlots(gripIndex)
+            If i = slot Then Return True
+        Next
+        Return False
+    End Function
+
     Friend Function EffectiveTransformMode(gripIndex As Integer) As Integer
         If ModeValueType = 2 Then Return 2
         If SlotAppliesToAll(gripIndex) Then Return 1
@@ -488,7 +518,7 @@ Public Class GumballComp
                     GH_ParamAccess.tree)
             Case ZuiOptionalKind.ApplyToAll
                 Return CreateBoolZuiParam("Apply to all", "Aa",
-                    "When true for an item, dragging that gumball transforms all geometry equally (tree matches G).",
+                    "When true for an item, dragging that gumball transforms all geometry on the same input branch equally (tree matches G; one value per branch applies to the whole branch).",
                     GH_ParamAccess.tree)
             Case ZuiOptionalKind.DisplayMode
                 Return New Grasshopper.Kernel.Parameters.Param_Integer With {
@@ -762,8 +792,12 @@ Public Class GumballComp
                         Dim v As Boolean = defaultValue
                         If useBroadcast Then
                             v = broadcast
-                        ElseIf valueBranch IsNot Nothing AndAlso j < valueBranch.Count AndAlso valueBranch(j) IsNot Nothing Then
-                            v = valueBranch(j).Value
+                        ElseIf valueBranch IsNot Nothing Then
+                            If valueBranch.Count = 1 AndAlso valueBranch(0) IsNot Nothing Then
+                                v = valueBranch(0).Value
+                            ElseIf j < valueBranch.Count AndAlso valueBranch(j) IsNot Nothing Then
+                                v = valueBranch(j).Value
+                            End If
                         End If
                         apply(slot, v)
                     End If
@@ -841,6 +875,7 @@ Public Class GumballComp
         Dim n As Integer = If(MyGumball Is Nothing, 0, MyGumball.Count)
         If n <= 0 Then
             SlotSettings = Nothing
+            _slotPaths = Nothing
             Return
         End If
         ReDim SlotSettings(n - 1)
@@ -1081,6 +1116,8 @@ Public Class GumballComp
     Private Paths As GH_Path()
     ''' <summary>Parallel to flattened input leaves: index into MyGumball geometry/Xform (-1 means null input at that leaf).</summary>
     Private _leafToGumballSlot As Integer()
+    ''' <summary>Input tree path per gumball slot (parallel to MyGumball geometry indices).</summary>
+    Private _slotPaths As GH_Path()
     ''' <summary>Maximum snap distance while translating (model units); NaN = automatic from document tolerance.</summary>
     Public SnapTranslateTolerance As Double = Double.NaN
 
@@ -1374,7 +1411,7 @@ Public Class GumballComp
                 Next
             Next
         End If
-
+        _slotPaths = newSlotPaths.ToArray()
 
         'Set cache.
         If (Cache.DataCount = 0) Then
@@ -1443,11 +1480,13 @@ Public Class GumballComp
 
                         Select Case EffectiveTransformMode(pSlot)
 
-                            Case 1 ' Apply to all — preview transforms every slot equally.
-                                Dim gx As GeometryBase = MyGumball.Geometry(slot).Duplicate()
-                                gx.Transform(liveD)
-                                d = GH_Convert.ToGeometricGoo(gx)
-                                xfOut = ComposeGhTransformAppendGeneric(MyGumball.Xform(slot), liveD)
+                            Case 1 ' Apply to all — preview transforms slots in the same branch/group.
+                                If IsTransformGroupMember(slot, pSlot) Then
+                                    Dim gx As GeometryBase = MyGumball.Geometry(slot).Duplicate()
+                                    gx.Transform(liveD)
+                                    d = GH_Convert.ToGeometricGoo(gx)
+                                    xfOut = ComposeGhTransformAppendGeneric(MyGumball.Xform(slot), liveD)
+                                End If
 
                             Case 0 ' Normal — preview only on the dragged slot.
                                 If slot = pSlot Then
@@ -2734,9 +2773,9 @@ Public Class GhGumball
                 Geometry(gripIndex).Transform(gbxform)
                 UpdateGumball(gripIndex)
 
-            Case 1 'Apply to all.
+            Case 1 'Apply to all (whole tree from menu, or same input branch from Aa).
                 Dim ghXform As New Grasshopper.Kernel.Types.GH_Transform(New Grasshopper.Kernel.Types.Transforms.Generic(gbxform))
-                For i As Int32 = 0 To Count - 1
+                For Each i As Integer In Component.TransformTargetSlots(gripIndex)
                     For Each t As Grasshopper.Kernel.Types.Transforms.ITransform In ghXform.CompoundTransforms
                         Xform(i).CompoundTransforms.Add(t.Duplicate())
                     Next
@@ -3569,7 +3608,7 @@ Public Class GhGumball
                 Case Rhino.UI.Gumball.GumballMode.ScaleX
                     gbxform = Transform.Scale(pln, value, 1, 1)
                     If Component.SlotAppliesToAll(Index) Then 'Apply to all.
-                        For i As Int32 = 0 To Count - 1
+                        For Each i As Integer In Component.TransformTargetSlots(Index)
                             Dim frame As Rhino.UI.Gumball.GumballFrame = Conduits(i).Gumball.Frame
                             frame.ScaleGripDistance = New Vector3d(frame.ScaleGripDistance.X * value, frame.ScaleGripDistance.Y, frame.ScaleGripDistance.Z)
                             Gumballs(i).Frame = frame
@@ -3585,7 +3624,7 @@ Public Class GhGumball
                 Case Rhino.UI.Gumball.GumballMode.ScaleY
                     gbxform = Transform.Scale(pln, 1, value, 1)
                     If Component.SlotAppliesToAll(Index) Then 'Apply to all.
-                        For i As Int32 = 0 To Count - 1
+                        For Each i As Integer In Component.TransformTargetSlots(Index)
                             Dim frame As Rhino.UI.Gumball.GumballFrame = Conduits(i).Gumball.Frame
                             frame.ScaleGripDistance = New Vector3d(frame.ScaleGripDistance.X, frame.ScaleGripDistance.Y * value, frame.ScaleGripDistance.Z)
                             Gumballs(i).Frame = frame
@@ -3601,7 +3640,7 @@ Public Class GhGumball
                 Case Rhino.UI.Gumball.GumballMode.ScaleZ
                     gbxform = Transform.Scale(pln, 1, 1, value)
                     If Component.SlotAppliesToAll(Index) Then 'Apply to all.
-                        For i As Int32 = 0 To Count - 1
+                        For Each i As Integer In Component.TransformTargetSlots(Index)
                             Dim frame As Rhino.UI.Gumball.GumballFrame = Conduits(i).Gumball.Frame
                             frame.ScaleGripDistance = New Vector3d(frame.ScaleGripDistance.X, frame.ScaleGripDistance.Y, frame.ScaleGripDistance.Z * value)
                             Gumballs(i).Frame = frame
@@ -3637,7 +3676,7 @@ Public Class GhGumball
 
                     Case 1 'Apply to all.
                         Dim ghXform As New Grasshopper.Kernel.Types.GH_Transform(New Grasshopper.Kernel.Types.Transforms.Generic(gbxform))
-                        For i As Int32 = 0 To Count - 1
+                        For Each i As Integer In Component.TransformTargetSlots(Index)
                             For Each t As Grasshopper.Kernel.Types.Transforms.ITransform In ghXform.CompoundTransforms
                                 Xform(i).CompoundTransforms.Add(t.Duplicate())
                             Next
