@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
@@ -58,6 +58,19 @@
   <!-- VB emits a .dll assembly; Grasshopper expects a .gha extension (same PE file). -->
   <Target Name="CopyGhaPlugin" AfterTargets="Build">
     <Copy SourceFiles="$(TargetDir)$(TargetFileName)" DestinationFiles="$(TargetDir)$(AssemblyName).gha" SkipUnchangedFiles="false" />
+  </Target>
+
+  <!-- Copy built .gha into Grasshopper Libraries after every successful build (macOS Rhino 8). -->
+  <PropertyGroup>
+    <DeployGrasshopperLibraries Condition="'$(DeployGrasshopperLibraries)' == ''">true</DeployGrasshopperLibraries>
+    <GrasshopperLibrariesDir Condition="'$(OS)' == 'Windows_NT'">$(AppData)\Grasshopper\Libraries</GrasshopperLibrariesDir>
+    <GrasshopperLibrariesDir Condition="'$(OS)' != 'Windows_NT'">$(HOME)/Library/Application Support/McNeel/Rhinoceros/8.0/Plug-ins/Grasshopper (b45a29b1-4343-4035-989e-044e8580d9cf)/Libraries</GrasshopperLibrariesDir>
+  </PropertyGroup>
+
+  <Target Name="DeployGhaToLibraries" AfterTargets="CopyGhaPlugin" Condition="'$(DeployGrasshopperLibraries)' == 'true'">
+    <MakeDir Directories="$(GrasshopperLibrariesDir)" Condition="!Exists('$(GrasshopperLibrariesDir)')" />
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName).gha" DestinationFiles="$(GrasshopperLibrariesDir)/$(AssemblyName).gha" SkipUnchangedFiles="false" />
+    <Message Importance="high" Text="Deployed $(AssemblyName).gha to $(GrasshopperLibrariesDir)" />
   </Target>
 
 </Project>

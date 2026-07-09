@@ -33,15 +33,58 @@ Friend NotInheritable Class GumballNumericBackdropMouse
 
     Protected Overrides Sub OnMouseDown(e As Rhino.UI.MouseCallbackEventArgs)
         MyBase.OnMouseDown(e)
-        FormTextBox.RequestDismissFromBackdropMouse()
-        FormAttributes.RequestDismissFromBackdropMouse()
-        FormTextTagBox.RequestDismissFromBackdropMouse()
-        FormCurveSliderBox.RequestDismissFromBackdropMouse()
+        If FormTextBox.ConsumeBackdropMouseDown() OrElse
+            FormAttributes.ConsumeBackdropMouseDown() OrElse
+            FormTextTagBox.ConsumeBackdropMouseDown() OrElse
+            FormCurveSliderBox.ConsumeBackdropMouseDown() Then
+            e.Cancel = True
+        End If
     End Sub
 End Class
 
 Public Class GumballComp
     Inherits GH_Component
+    Implements IGH_VariableParameterComponent
+
+    Private Enum ZuiOptionalKind
+        None = -1
+        Active = 0
+        ApplyToAll = 1
+        DisplayMode = 2
+        AlignToGeometry = 3
+        SnapToGeometry = 4
+        PreserveChanges = 5
+        ProximityCache = 6
+        LiveTransforms = 7
+        ClearCache = 8
+        SaveShifted = 9
+    End Enum
+
+    Private Shared ReadOnly ZuiCanonicalOrder As ZuiOptionalKind() = {
+        ZuiOptionalKind.Active,
+        ZuiOptionalKind.ApplyToAll,
+        ZuiOptionalKind.DisplayMode,
+        ZuiOptionalKind.AlignToGeometry,
+        ZuiOptionalKind.SnapToGeometry,
+        ZuiOptionalKind.PreserveChanges,
+        ZuiOptionalKind.ProximityCache,
+        ZuiOptionalKind.SaveShifted,
+        ZuiOptionalKind.LiveTransforms,
+        ZuiOptionalKind.ClearCache
+    }
+
+    Private Const BaseInputCount As Integer = 1
+
+    ''' <summary>Per gumball-slot settings resolved from optional tree inputs (matched to geometry paths).</summary>
+    Friend Structure GumballSlotSettings
+        Public Active As Boolean
+        Public ApplyToAll As Boolean
+        Public DisplayMode As Integer
+    End Structure
+
+    Friend SlotSettings As GumballSlotSettings()
+
+    Private _clearCacheInputPrev As Boolean = False
 
     Public Sub New()
         MyBase.New("Gumball ", "Gumball", "Viewport gumball: Shift while scaling = uniform XYZ (like Rhino); click a grip (no drag) for numeric entry.", "Params", "Util")
@@ -120,6 +163,11 @@ Public Class GumballComp
         m_attributes = New GumballCompAtt(Me)
     End Sub
 
+    Public Overrides Sub AddedToDocument(document As GH_Document)
+        MyBase.AddedToDocument(document)
+        SyncOptionalInputsFromFlags()
+    End Sub
+
     Public Overrides Sub RemovedFromDocument(document As GH_Document)
         If (MyGumball IsNot Nothing) Then MyGumball.Dispose()
     End Sub
@@ -144,21 +192,18 @@ Public Class GumballComp
     End Property
 
     Protected Overrides Sub AfterSolveInstance()
-        If (MyGumball IsNot Nothing) Then
-            If (Me.Hidden) Then MyGumball.HideGumballs()
-            If Not (Me.Attributes.Selected) Then MyGumball.HideGumballs()
-        End If
+        SyncGumballVisibility()
     End Sub
 
     Protected Overrides Sub AppendAdditionalComponentMenuItems(ByVal menu As Windows.Forms.ToolStripDropDown)
 
-        Dim union As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Apply to all", AddressOf Me.Menu_ApplyToAll, True, Me.ModeValue(0) = 1)
+        Dim union As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Apply to all", AddressOf Me.Menu_ApplyToAll, True, MenuBoolChecked(ModeValueType = 1, ZuiOptionalKind.ApplyToAll))
         union.ToolTipText = "Performs transformation of a gumball to all geometry"
 
-        Dim aling As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Align to geometry", AddressOf Me.Menu_AlingToGeometry, True, CBool(Me.ModeValue(2)))
+        Dim aling As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Align to geometry", AddressOf Me.Menu_AlingToGeometry, True, HasZuiInput(ZuiOptionalKind.AlignToGeometry) OrElse CBool(Me.ModeValue(2)))
         aling.ToolTipText = "Use a geometry to align gumballs"
 
-        Dim snapGeom As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Snap to geometry", AddressOf Me.Menu_SnapToGeometry, True, CBool(Me.ModeValue(3)))
+        Dim snapGeom As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Snap to geometry", AddressOf Me.Menu_SnapToGeometry, True, HasZuiInput(ZuiOptionalKind.SnapToGeometry) OrElse CBool(Me.ModeValue(3)))
         snapGeom.ToolTipText = "Shows inputs S (targets) and t (max snap distance, doc units, optional): while translating grips, snaps toward the nearest point within that distance."
 
         Dim reloc As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Relocate gumball", AddressOf Me.Menu_RelocateG, True, Me.ModeValue(0) = 2)
@@ -172,22 +217,34 @@ Public Class GumballComp
 
         Menu_AppendSeparator(menu)
 
-        Dim preserveOnChange As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Preserve on changes", AddressOf Me.Menu_PreserveOnChanges, True, Me.PreserveTransformsOnGeometryChange)
+        Dim preserveOnChange As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Preserve on changes", AddressOf Me.Menu_PreserveOnChanges, True, MenuBoolChecked(PreserveTransformsOnGeometryChange, ZuiOptionalKind.PreserveChanges))
         preserveOnChange.ToolTipText = "Keep gumball transforms when upstream geometry or the data tree changes (per item index when types match)."
 
-        Dim proximityItem As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Proximity cache", AddressOf Me.Menu_ProximityCache, True, Me.ProximityCache)
+        Dim proximityItem As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Proximity cache", AddressOf Me.Menu_ProximityCache, True, MenuBoolChecked(ProximityCache, ZuiOptionalKind.ProximityCache))
         proximityItem.ToolTipText = "Like preserve on changes, but match each item to the prior gumball by nearest cached bounding‑box centre (same object type), so list shifts keep the right transform."
 
-        Dim liveItem As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Live", AddressOf Me.Menu_LiveTransformsWhileDragging, True, Me.LiveTransformsWhileDragging)
+        Dim saveShiftedItem As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Save shifted", AddressOf Me.Menu_SaveShifted, True, MenuBoolChecked(Me.SaveShifted, ZuiOptionalKind.SaveShifted))
+        saveShiftedItem.Enabled = MenuBoolChecked(ProximityCache, ZuiOptionalKind.ProximityCache)
+        saveShiftedItem.ToolTipText = "When proximity cache is on, remember gumball transforms for geometry that leaves the list and restore them if it returns."
+
+        Dim liveItem As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Live", AddressOf Me.Menu_LiveTransformsWhileDragging, True, MenuBoolChecked(LiveTransformsWhileDragging, ZuiOptionalKind.LiveTransforms))
         liveItem.ToolTipText = "Refresh downstream Grasshopper while dragging the gumball; one undo compound entry per finished drag."
 
         Menu_AppendSeparator(menu)
 
-        Dim arrows As Windows.Forms.ToolStripItem = Menu_AppendItem(menu, "Only arrows", AddressOf Me.Menu_OnlyArrows, True, Me.ModeValue(1) = 1)
-        arrows.ToolTipText = "Show only arrows"
+        Dim displayMode As Integer = EffectiveDisplayModeForMenu()
 
-        Dim free As Windows.Forms.ToolStripItem = Menu_AppendItem(menu, "Free translate", AddressOf Me.Menu_FreeTranslate, True, Me.ModeValue(1) = 2)
-        free.ToolTipText = "Hide all and drag from gumball center"
+        Dim arrows As Windows.Forms.ToolStripItem = Menu_AppendItem(menu, "Only arrows", AddressOf Me.Menu_OnlyArrows, True, displayMode = 1)
+        arrows.ToolTipText = "Show only translation arrows (hide planar grips and scale)."
+
+        Dim rotOnly As Windows.Forms.ToolStripItem = Menu_AppendItem(menu, "Only rotation", AddressOf Me.Menu_OnlyRotation, True, displayMode = 2)
+        rotOnly.ToolTipText = "Show only rotation arcs (hide translation and scale grips)."
+
+        Dim scaleOnly As Windows.Forms.ToolStripItem = Menu_AppendItem(menu, "Only scale", AddressOf Me.Menu_OnlyScale, True, displayMode = 3)
+        scaleOnly.ToolTipText = "Show only scale grips (hide translation and rotation grips)."
+
+        Dim free As Windows.Forms.ToolStripItem = Menu_AppendItem(menu, "Free translate", AddressOf Me.Menu_FreeTranslate, True, displayMode = 4)
+        free.ToolTipText = "Hide all grips and drag from the gumball center."
 
         Menu_AppendSeparator(menu)
 
@@ -201,21 +258,20 @@ Public Class GumballComp
 #Region "Menu"
     Private Sub Menu_ApplyToAll()
         If (MyGumball IsNot Nothing) Then Me.RecordUndoEvent("Gumball Mode", New GbUndo(Me.MyGumball))
-        If (1 = Me.ModeValue(0)) Then
-            Me.ModeValue(0) = 0
-        Else
-            Me.ModeValue(0) = 1
-        End If
+        Dim enable As Boolean = (ModeValueType <> 1)
+        ModeValue(0) = If(enable, 1, 0)
     End Sub
 
     Private Sub Menu_AlingToGeometry()
         If (MyGumball IsNot Nothing) Then Me.RecordUndoEvent("Gumball Mode", New GbUndo(Me.MyGumball))
-        Me.ModeValue(2) = CInt(Not CBool(Me.ModeValue(2)))
+        SetZuiKindEnabled(ZuiOptionalKind.AlignToGeometry, Not (HasZuiInput(ZuiOptionalKind.AlignToGeometry) OrElse ModeValueAlign))
+        Me.ExpireSolution(True)
     End Sub
 
     Private Sub Menu_SnapToGeometry()
         If (MyGumball IsNot Nothing) Then Me.RecordUndoEvent("Gumball Mode", New GbUndo(Me.MyGumball))
-        Me.ModeValue(3) = CInt(Not CBool(Me.ModeValue(3)))
+        SetZuiKindEnabled(ZuiOptionalKind.SnapToGeometry, Not (HasZuiInput(ZuiOptionalKind.SnapToGeometry) OrElse ModeValueSnap))
+        Me.ExpireSolution(True)
     End Sub
 
     Private Sub Menu_RelocateG()
@@ -240,35 +296,30 @@ Public Class GumballComp
         End Try
     End Sub
 
-    Private Sub Menu_OnlyArrows()
-        If (MyGumball Is Nothing) Then Exit Sub
+    Private Sub SetDisplayModeFromMenu(mode As Integer)
+        If MyGumball Is Nothing Then Exit Sub
         Me.RecordUndoEvent("Gumball Attributes", New GbUndo(Me.MyGumball))
-        If (ModeValueAtt = 1) Then
-            ModeValueAtt = 0
-            MyGumball.CustomAppearance = New Integer(9) {1, 1, 2, 1, 1, MyGumball.CustomAppearance(5), MyGumball.CustomAppearance(6),
-                MyGumball.CustomAppearance(7), MyGumball.CustomAppearance(8), MyGumball.CustomAppearance(9)}
+        If ModeValueAtt = mode Then
+            ApplyModeValueAtt(0)
         Else
-            ModeValueAtt = 1
-            MyGumball.CustomAppearance = New Integer(9) {1, 0, 2, 0, 0, MyGumball.CustomAppearance(5), MyGumball.CustomAppearance(6),
-                MyGumball.CustomAppearance(7), MyGumball.CustomAppearance(8), MyGumball.CustomAppearance(9)}
+            ApplyModeValueAtt(mode)
         End If
+    End Sub
 
+    Private Sub Menu_OnlyArrows()
+        SetDisplayModeFromMenu(1)
     End Sub
 
     Private Sub Menu_FreeTranslate()
-        If (MyGumball Is Nothing) Then Exit Sub
-        Me.RecordUndoEvent("Gumball Attributes", New GbUndo(Me.MyGumball))
+        SetDisplayModeFromMenu(4)
+    End Sub
 
-        If (ModeValueAtt = 2) Then
-            ModeValueAtt = 0
-            MyGumball.CustomAppearance = New Integer(9) {1, 1, 2, 1, 1, MyGumball.CustomAppearance(5), MyGumball.CustomAppearance(6),
-                 MyGumball.CustomAppearance(7), MyGumball.CustomAppearance(8), MyGumball.CustomAppearance(9)}
-        Else
-            ModeValueAtt = 2
-            MyGumball.CustomAppearance = New Integer(9) {0, 0, 2, 0, 0, MyGumball.CustomAppearance(5), MyGumball.CustomAppearance(6),
-                MyGumball.CustomAppearance(7), MyGumball.CustomAppearance(8), MyGumball.CustomAppearance(9)}
-        End If
+    Private Sub Menu_OnlyRotation()
+        SetDisplayModeFromMenu(2)
+    End Sub
 
+    Private Sub Menu_OnlyScale()
+        SetDisplayModeFromMenu(3)
     End Sub
 
     Private Sub Menu_Reset()
@@ -278,27 +329,625 @@ Public Class GumballComp
 
     Public Sub Menu_ClearCache()
         Me.RecordUndoEvent("Gumball Clear Cache")
+        ClearGumballCacheInternal()
+    End Sub
+
+    Private Sub Menu_ProximityCache()
+        If (MyGumball IsNot Nothing) Then Me.RecordUndoEvent("Proximity cache", New GbUndo(Me.MyGumball))
+        ProximityCache = Not ProximityCache
+        Me.ExpireSolution(True)
+    End Sub
+
+    Private Sub Menu_SaveShifted()
+        If Not MenuBoolChecked(ProximityCache, ZuiOptionalKind.ProximityCache) Then Return
+        If (MyGumball IsNot Nothing) Then Me.RecordUndoEvent("Save shifted", New GbUndo(Me.MyGumball))
+        SaveShifted = Not SaveShifted
+        Me.ExpireSolution(True)
+    End Sub
+
+    Private Sub Menu_PreserveOnChanges()
+        If (MyGumball IsNot Nothing) Then Me.RecordUndoEvent("Preserve on changes", New GbUndo(Me.MyGumball))
+        PreserveTransformsOnGeometryChange = Not PreserveTransformsOnGeometryChange
+        Me.ExpireSolution(True)
+    End Sub
+
+    Private Sub Menu_LiveTransformsWhileDragging()
+        If (MyGumball IsNot Nothing) Then Me.RecordUndoEvent("Live (while dragging)", New GbUndo(Me.MyGumball))
+        LiveTransformsWhileDragging = Not LiveTransformsWhileDragging
+        Me.ExpireSolution(True)
+    End Sub
+#End Region
+
+#Region "Optional inputs / ZUI"
+
+    Private Shared Function NickNameForZuiKind(kind As ZuiOptionalKind) As String
+        Select Case kind
+            Case ZuiOptionalKind.Active : Return "Ac"
+            Case ZuiOptionalKind.ApplyToAll : Return "Aa"
+            Case ZuiOptionalKind.DisplayMode : Return "Dm"
+            Case ZuiOptionalKind.AlignToGeometry : Return "A"
+            Case ZuiOptionalKind.SnapToGeometry : Return "S"
+            Case ZuiOptionalKind.PreserveChanges : Return "Pr"
+            Case ZuiOptionalKind.ProximityCache : Return "Px"
+            Case ZuiOptionalKind.SaveShifted : Return "Ss"
+            Case ZuiOptionalKind.LiveTransforms : Return "Lv"
+            Case ZuiOptionalKind.ClearCache : Return "Cc"
+            Case Else : Return String.Empty
+        End Select
+    End Function
+
+    Private Function HasZuiInput(kind As ZuiOptionalKind) As Boolean
+        If kind = ZuiOptionalKind.None Then Return False
+        Return FindInputIndexByNickName(NickNameForZuiKind(kind)) >= 0
+    End Function
+
+    Private Function NextZuiKindToInsert() As ZuiOptionalKind
+        For Each k As ZuiOptionalKind In ZuiCanonicalOrder
+            If Not HasZuiInput(k) Then Return k
+        Next
+        Return ZuiOptionalKind.None
+    End Function
+
+    Private Function CanonicalInsertIndex(kind As ZuiOptionalKind) As Integer
+        Dim idx As Integer = BaseInputCount
+        For Each k As ZuiOptionalKind In ZuiCanonicalOrder
+            If k = kind Then Return idx
+            If HasZuiInput(k) Then idx += 1
+        Next
+        Return Math.Max(BaseInputCount, Params.Input.Count)
+    End Function
+
+    Private Shared Function CreateBoolZuiParam(name As String, nick As String, description As String, Optional access As GH_ParamAccess = GH_ParamAccess.item) As Grasshopper.Kernel.Parameters.Param_Boolean
+        Return New Grasshopper.Kernel.Parameters.Param_Boolean With {
+            .Optional = True,
+            .Name = name,
+            .NickName = nick,
+            .Description = description,
+            .Access = access
+        }
+    End Function
+
+    Private Function KindToInsertAt(index As Integer) As ZuiOptionalKind
+        If index < BaseInputCount OrElse index > Params.Input.Count Then Return ZuiOptionalKind.None
+        If index = Params.Input.Count Then Return NextZuiKindToInsert()
+        Dim targetSlot As Integer = index - BaseInputCount
+        Dim canonSlot As Integer = 0
+        For Each k As ZuiOptionalKind In ZuiCanonicalOrder
+            If canonSlot = targetSlot Then
+                If Not HasZuiInput(k) Then Return k
+                Return ZuiOptionalKind.None
+            End If
+            canonSlot += 1
+        Next
+        Return ZuiOptionalKind.None
+    End Function
+
+    Private Function IsRemovableZuiInput(index As Integer) As Boolean
+        If index < BaseInputCount OrElse index >= Params.Input.Count Then Return False
+        Dim nick As String = Params.Input(index).NickName
+        For Each k As ZuiOptionalKind In ZuiCanonicalOrder
+            If String.Equals(nick, NickNameForZuiKind(k), StringComparison.OrdinalIgnoreCase) Then Return True
+        Next
+        Return String.Equals(nick, "Oa", StringComparison.OrdinalIgnoreCase) OrElse
+            String.Equals(nick, "Ft", StringComparison.OrdinalIgnoreCase) OrElse
+            String.Equals(nick, "Or", StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    Private Function FindActiveInputIndex() As Integer
+        Return FindInputIndexByNickName("Ac")
+    End Function
+
+    Private Function HasAcInputWired() As Boolean
+        Dim ix As Integer = FindInputIndexByNickName("Ac")
+        Return ix >= 0 AndAlso Params.Input(ix).SourceCount > 0
+    End Function
+
+    Friend Function WantsSlotVisible(slot As Integer) As Boolean
+        If MyGumball Is Nothing Then Return False
+        If Hidden OrElse Locked Then Return False
+        If Params Is Nothing OrElse Params.Input.Count = 0 OrElse Params.Input(0).VolatileData.DataCount = 0 Then Return False
+        If SlotSettings Is Nothing OrElse slot < 0 OrElse slot >= SlotSettings.Length Then Return False
+        If Not SlotSettings(slot).Active Then Return False
+        If HasAcInputWired() Then Return True
+        Return Attributes IsNot Nothing AndAlso Attributes.Selected
+    End Function
+
+    Friend Function SlotAppliesToAll(slot As Integer) As Boolean
+        If ModeValueType = 1 Then Return True
+        If SlotSettings Is Nothing OrElse slot < 0 OrElse slot >= SlotSettings.Length Then Return False
+        Return SlotSettings(slot).ApplyToAll
+    End Function
+
+    Friend Function EffectiveTransformMode(gripIndex As Integer) As Integer
+        If ModeValueType = 2 Then Return 2
+        If SlotAppliesToAll(gripIndex) Then Return 1
+        Return 0
+    End Function
+
+    Friend Sub SyncGumballVisibility()
+        If MyGumball Is Nothing Then Return
+        Dim anyVisible As Boolean = False
+        For i As Integer = 0 To MyGumball.Count - 1
+            Dim vis As Boolean = WantsSlotVisible(i)
+            MyGumball.SetConduitEnabled(i, vis)
+            If vis Then anyVisible = True
+        Next
+        Dim needsSelection As Boolean = Not HasAcInputWired()
+        MyGumball.Enabled = anyVisible AndAlso (Not needsSelection OrElse (Attributes IsNot Nothing AndAlso Attributes.Selected))
+        Try
+            Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
+        Catch
+        End Try
+    End Sub
+
+    Private Function CreateZuiParam(kind As ZuiOptionalKind) As IGH_Param
+        Select Case kind
+            Case ZuiOptionalKind.Active
+                Return CreateBoolZuiParam("Active", "Ac",
+                    "When true, the gumball for that geometry item stays interactive (tree matches G; single value broadcasts). Overrides canvas selection when wired.",
+                    GH_ParamAccess.tree)
+            Case ZuiOptionalKind.ApplyToAll
+                Return CreateBoolZuiParam("Apply to all", "Aa",
+                    "When true for an item, dragging that gumball transforms all geometry equally (tree matches G).",
+                    GH_ParamAccess.tree)
+            Case ZuiOptionalKind.DisplayMode
+                Return New Grasshopper.Kernel.Parameters.Param_Integer With {
+                    .Optional = True,
+                    .Name = "Display mode",
+                    .NickName = "Dm",
+                    .Description = "Per-item grip preset (tree matches G): 0 = default, 1 = only arrows, 2 = only rotation, 3 = only scale, 4 = free translation.",
+                    .Access = GH_ParamAccess.tree
+                }
+            Case ZuiOptionalKind.AlignToGeometry
+                Return CreateAlignGeometryParam()
+            Case ZuiOptionalKind.SnapToGeometry
+                Return CreateSnapTargetParam()
+            Case ZuiOptionalKind.PreserveChanges
+                Return CreateBoolZuiParam("Preserve on changes", "Pr",
+                    "Keep gumball transforms when upstream geometry or the data tree changes.")
+            Case ZuiOptionalKind.ProximityCache
+                Return CreateBoolZuiParam("Proximity cache", "Px",
+                    "Match each item to the prior gumball by nearest cached bounding-box centre when the list changes.")
+            Case ZuiOptionalKind.SaveShifted
+                Return CreateBoolZuiParam("Save shifted", "Ss",
+                    "When proximity cache is on, remember gumball transforms for geometry that leaves the list and restore them if it returns.")
+            Case ZuiOptionalKind.LiveTransforms
+                Return CreateBoolZuiParam("Live", "Lv",
+                    "Refresh downstream Grasshopper while dragging the gumball.")
+            Case ZuiOptionalKind.ClearCache
+                Return CreateBoolZuiParam("Clear cache", "Cc",
+                    "Pulse true to reset gumball and clear cache data (rising edge only).")
+        End Select
+        Return Nothing
+    End Function
+
+    Private Function CreateAlignGeometryParam() As Grasshopper.Kernel.Parameters.Param_Geometry
+        Return New Grasshopper.Kernel.Parameters.Param_Geometry With {
+            .Optional = True,
+            .Name = "Geometry to align",
+            .NickName = "A",
+            .Description = "Plane or geometry per item (tree matches G) to orient each gumball. Unwired or empty = align off.",
+            .Access = GH_ParamAccess.tree
+        }
+    End Function
+
+    Private Function CreateSnapTargetParam() As Grasshopper.Kernel.Parameters.Param_Geometry
+        Return New Grasshopper.Kernel.Parameters.Param_Geometry With {
+            .Optional = True,
+            .Name = "Snap target",
+            .NickName = "S",
+            .Description = "Snap target per item (tree matches G) while translating gumball grips. Unwired or empty = snap off.",
+            .Access = GH_ParamAccess.tree
+        }
+    End Function
+
+    Private Sub SetZuiKindEnabled(kind As ZuiOptionalKind, enabled As Boolean)
+        If kind = ZuiOptionalKind.None Then Return
+        If enabled Then
+            If HasZuiInput(kind) Then Return
+            Dim param As IGH_Param = CreateZuiParam(kind)
+            If param Is Nothing Then Return
+            Params.RegisterInputParam(param, CanonicalInsertIndex(kind))
+        Else
+            Dim ix As Integer = FindInputIndexByNickName(NickNameForZuiKind(kind))
+            If ix < 0 Then Return
+            If kind = ZuiOptionalKind.AlignToGeometry AndAlso MyGumball IsNot Nothing Then
+                MyGumball.ClearAllSlotAlign()
+                MyGumball.GeometrytoAlign = Nothing
+                MyGumball.ClearAlignAxisReference()
+            ElseIf kind = ZuiOptionalKind.SnapToGeometry AndAlso MyGumball IsNot Nothing Then
+                MyGumball.DisposeSnapTranslateTargets()
+            End If
+            Dim p As IGH_Param = Params.Input(ix)
+            p.RemoveAllSources()
+            Params.UnregisterInputParameter(p)
+        End If
+        SyncFeatureFlagsFromInputs()
+        Params.OnParametersChanged()
+    End Sub
+
+    Friend Sub SyncOptionalInputsFromFlags()
+        EnsureZuiMatchesFlag(ZuiOptionalKind.DisplayMode, ModeValueAtt <> 0)
+        EnsureZuiMatchesFlag(ZuiOptionalKind.AlignToGeometry, ModeValueAlign)
+        EnsureZuiMatchesFlag(ZuiOptionalKind.SnapToGeometry, ModeValueSnap)
+        VariableParameterMaintenance()
+        Params.OnParametersChanged()
+    End Sub
+
+    Private Sub SyncFeatureFlagsFromInputs()
+        ModeValueAlign = HasZuiInput(ZuiOptionalKind.AlignToGeometry)
+        ModeValueSnap = HasZuiInput(ZuiOptionalKind.SnapToGeometry)
+    End Sub
+
+    Private Function ZuiInputWired(ix As Integer) As Boolean
+        If ix < 0 OrElse Params Is Nothing Then Return False
+        Dim p As IGH_Param = Params.Input(ix)
+        Return p IsNot Nothing AndAlso p.SourceCount > 0
+    End Function
+
+    Private Function ReadBoolInputVolatile(ix As Integer, defaultIfUnwired As Boolean) As Boolean
+        If ix < 0 OrElse Params Is Nothing Then Return defaultIfUnwired
+        Dim p As IGH_Param = Params.Input(ix)
+        If p Is Nothing OrElse p.SourceCount = 0 Then Return defaultIfUnwired
+        If p.VolatileDataCount = 0 Then Return defaultIfUnwired
+        Dim goo As IGH_Goo = p.VolatileData.AllData(True).FirstOrDefault()
+        Dim gb As GH_Boolean = TryCast(goo, GH_Boolean)
+        If gb IsNot Nothing Then Return gb.Value
+        Return defaultIfUnwired
+    End Function
+
+    Private Function ReadIntInputVolatile(ix As Integer, defaultIfUnwired As Integer) As Integer
+        If ix < 0 OrElse Params Is Nothing Then Return defaultIfUnwired
+        Dim p As IGH_Param = Params.Input(ix)
+        If p Is Nothing OrElse p.SourceCount = 0 Then Return defaultIfUnwired
+        If p.VolatileDataCount = 0 Then Return defaultIfUnwired
+        Dim goo As IGH_Goo = p.VolatileData.AllData(True).FirstOrDefault()
+        Dim gi As GH_Integer = TryCast(goo, GH_Integer)
+        If gi IsNot Nothing Then Return gi.Value
+        Return defaultIfUnwired
+    End Function
+
+    Private Function MenuBoolChecked(defaultValue As Boolean, kind As ZuiOptionalKind) As Boolean
+        Dim ix As Integer = FindInputIndexByNickName(NickNameForZuiKind(kind))
+        If ix >= 0 AndAlso ZuiInputWired(ix) Then Return ReadBoolInputVolatile(ix, defaultValue)
+        Return defaultValue
+    End Function
+
+    Private Function EffectiveDisplayModeForMenu() As Integer
+        Dim dmIx As Integer = FindInputIndexByNickName("Dm")
+        If dmIx >= 0 AndAlso ZuiInputWired(dmIx) Then
+            Return ClampDisplayMode(ReadIntInputVolatile(dmIx, ModeValueAtt))
+        End If
+        Return ModeValueAtt
+    End Function
+
+    Private Sub EnsureZuiMatchesFlag(kind As ZuiOptionalKind, shouldHave As Boolean)
+        If shouldHave Then
+            If Not HasZuiInput(kind) Then
+                Dim param As IGH_Param = CreateZuiParam(kind)
+                If param IsNot Nothing Then Params.RegisterInputParam(param, CanonicalInsertIndex(kind))
+            End If
+        ElseIf HasZuiInput(kind) Then
+            Dim ix As Integer = FindInputIndexByNickName(NickNameForZuiKind(kind))
+            If ix >= 0 Then
+                Dim p As IGH_Param = Params.Input(ix)
+                p.RemoveAllSources()
+                Params.UnregisterInputParameter(p)
+            End If
+        End If
+    End Sub
+
+    Private Sub ApplyBoolInput(DA As IGH_DataAccess, ix As Integer, ByRef target As Boolean, defaultIfUnwired As Boolean)
+        If ix < 0 Then Return
+        If Params.Input(ix).SourceCount > 0 Then
+            Dim v As Boolean = defaultIfUnwired
+            If DA.GetData(ix, v) Then target = v
+        End If
+        ' Unwired: keep target (menu toggle / Write-Read state); do not force defaultIfUnwired.
+    End Sub
+
+    Private Function ReadOptionalBoolInput(DA As IGH_DataAccess, ix As Integer) As Boolean?
+        If ix < 0 OrElse Params.Input(ix).SourceCount = 0 Then Return Nothing
+        Dim v As Boolean = False
+        If DA.GetData(ix, v) Then Return v
+        Return Nothing
+    End Function
+
+    Private Sub ApplyApplyToAllFromInputs(DA As IGH_DataAccess)
+        Dim aaIx As Integer = FindInputIndexByNickName("Aa")
+        If aaIx < 0 OrElse Params.Input(aaIx).SourceCount = 0 Then Return
+        ' Per-item Aa is resolved in BuildSlotSettings; single-value trees are handled there too.
+    End Sub
+
+    Private Function IsLiveGripDragActive() As Boolean
+        Return LiveTransformsWhileDragging AndAlso MyGumball IsNot Nothing AndAlso
+            MyGumball.PreviewGripSlot >= 0 AndAlso Not (MyGumball.PreviewGripDelta = Transform.Identity)
+    End Function
+
+    Private Shared Function ClampDisplayMode(mode As Integer) As Integer
+        If mode < 0 OrElse mode > 4 Then Return 0
+        Return mode
+    End Function
+
+    ''' <summary>Maps pre–display-mode-integer attmode values saved in older GH files.</summary>
+    Friend Shared Function MigrateLegacyAttMode(legacy As Integer) As Integer
+        Select Case legacy
+            Case 1 : Return 1
+            Case 2 : Return 4
+            Case 3 : Return 2
+            Case Else : Return ClampDisplayMode(legacy)
+        End Select
+    End Function
+
+    Friend Shared Function LoadDisplayModeFromChunk(att1 As GH_IO.Serialization.GH_Chunk) As Integer
+        If att1 Is Nothing Then Return 0
+        Dim dm As Integer = 0
+        If att1.TryGetInt32("displaymode", 7, dm) Then Return ClampDisplayMode(dm)
+        Return MigrateLegacyAttMode(att1.GetInt32("attmode", 0))
+    End Function
+
+    Private Function HasLegacyDisplayModeZui() As Boolean
+        Return FindInputIndexByNickName("Oa") >= 0 OrElse
+            FindInputIndexByNickName("Ft") >= 0 OrElse
+            FindInputIndexByNickName("Or") >= 0
+    End Function
+
+    Friend Shared Function BuildAppearancePresetForAtt(att As Integer, preserveFrom As Integer()) As Integer()
+        Dim ca As Integer() = preserveFrom
+        Select Case ClampDisplayMode(att)
+            Case 1
+                Return New Integer(9) {1, 0, 2, 0, 0, ca(5), ca(6), ca(7), ca(8), ca(9)}
+            Case 2
+                Return New Integer(9) {0, 0, 0, 1, 0, ca(5), ca(6), ca(7), ca(8), ca(9)}
+            Case 3
+                Return New Integer(9) {0, 0, 0, 0, 1, ca(5), ca(6), ca(7), ca(8), ca(9)}
+            Case 4
+                Return New Integer(9) {0, 0, 2, 0, 0, ca(5), ca(6), ca(7), ca(8), ca(9)}
+            Case Else
+                Return New Integer(9) {1, 1, 2, 1, 1, ca(5), ca(6), ca(7), ca(8), ca(9)}
+        End Select
+    End Function
+
+    Friend Shared Function AppearancePresetsEqual(a As Integer(), b As Integer()) As Boolean
+        If a Is Nothing OrElse b Is Nothing Then Return False
+        If a.Length <> b.Length Then Return False
+        For i As Integer = 0 To a.Length - 1
+            If a(i) <> b(i) Then Return False
+        Next
+        Return True
+    End Function
+
+    Private Sub ApplyStoredDisplayModeIfNeeded(DA As IGH_DataAccess)
+        ' Display modes are applied per slot in BuildSlotSettings / ApplyPerSlotDisplayModes.
+    End Sub
+
+    Private Sub ApplyModeValueAtt(att As Integer)
+        ModeValueAtt = ClampDisplayMode(att)
+        If MyGumball Is Nothing Then Return
+        If SlotSettings IsNot Nothing Then
+            For i As Integer = 0 To SlotSettings.Length - 1
+                SlotSettings(i).DisplayMode = ModeValueAtt
+            Next
+        End If
+        For i As Integer = 0 To MyGumball.Count - 1
+            MyGumball.ApplyAppearancePresetToSlot(i, ModeValueAtt)
+        Next
+    End Sub
+
+    Private Sub MapBoolTreeToSlots(DA As IGH_DataAccess, nick As String, geom As DataTree(Of GeometryBase),
+                                   defaultValue As Boolean, apply As Action(Of Integer, Boolean))
+        If SlotSettings Is Nothing OrElse _leafToGumballSlot Is Nothing Then Return
+        Dim ix As Integer = FindInputIndexByNickName(nick)
+        If ix < 0 OrElse Params.Input(ix).SourceCount = 0 Then Return
+        Dim tree As New GH_Structure(Of GH_Boolean)
+        If Not DA.GetDataTree(ix, tree) Then Return
+
+        Dim broadcast As Boolean = defaultValue
+        Dim useBroadcast As Boolean = False
+        If tree.DataCount = 1 Then
+            useBroadcast = True
+            Dim gb As GH_Boolean = tree.AllData(True).FirstOrDefault()
+            If gb IsNot Nothing Then broadcast = gb.Value
+        End If
+
+        Dim leafIx As Integer = 0
+        For bi As Integer = 0 To geom.BranchCount - 1
+            Dim path As GH_Path = geom.Paths(bi)
+            Dim valueBranch As IList(Of GH_Boolean) = Nothing
+            If Not useBroadcast AndAlso tree.PathExists(path) Then valueBranch = tree.Branch(path)
+            For j As Integer = 0 To geom.Branch(bi).Count - 1
+                If leafIx < _leafToGumballSlot.Length Then
+                    Dim slot As Integer = _leafToGumballSlot(leafIx)
+                    If slot >= 0 AndAlso slot < SlotSettings.Length Then
+                        Dim v As Boolean = defaultValue
+                        If useBroadcast Then
+                            v = broadcast
+                        ElseIf valueBranch IsNot Nothing AndAlso j < valueBranch.Count AndAlso valueBranch(j) IsNot Nothing Then
+                            v = valueBranch(j).Value
+                        End If
+                        apply(slot, v)
+                    End If
+                End If
+                leafIx += 1
+            Next
+        Next
+    End Sub
+
+    Private Sub MapIntTreeToSlots(DA As IGH_DataAccess, nick As String, geom As DataTree(Of GeometryBase),
+                                  defaultValue As Integer, apply As Action(Of Integer, Integer))
+        If SlotSettings Is Nothing OrElse _leafToGumballSlot Is Nothing Then Return
+        Dim ix As Integer = FindInputIndexByNickName(nick)
+        If ix < 0 OrElse Params.Input(ix).SourceCount = 0 Then Return
+        Dim tree As New GH_Structure(Of GH_Integer)
+        If Not DA.GetDataTree(ix, tree) Then Return
+
+        Dim broadcast As Integer = defaultValue
+        Dim useBroadcast As Boolean = False
+        If tree.DataCount = 1 Then
+            useBroadcast = True
+            Dim gi As GH_Integer = tree.AllData(True).FirstOrDefault()
+            If gi IsNot Nothing Then broadcast = gi.Value
+        End If
+
+        Dim leafIx As Integer = 0
+        For bi As Integer = 0 To geom.BranchCount - 1
+            Dim path As GH_Path = geom.Paths(bi)
+            Dim valueBranch As IList(Of GH_Integer) = Nothing
+            If Not useBroadcast AndAlso tree.PathExists(path) Then valueBranch = tree.Branch(path)
+            For j As Integer = 0 To geom.Branch(bi).Count - 1
+                If leafIx < _leafToGumballSlot.Length Then
+                    Dim slot As Integer = _leafToGumballSlot(leafIx)
+                    If slot >= 0 AndAlso slot < SlotSettings.Length Then
+                        Dim v As Integer = defaultValue
+                        If useBroadcast Then
+                            v = broadcast
+                        ElseIf valueBranch IsNot Nothing AndAlso j < valueBranch.Count AndAlso valueBranch(j) IsNot Nothing Then
+                            v = valueBranch(j).Value
+                        End If
+                        apply(slot, ClampDisplayMode(v))
+                    End If
+                End If
+                leafIx += 1
+            Next
+        Next
+    End Sub
+
+    Private Sub ApplyLegacyDisplayModeToSlots(DA As IGH_DataAccess)
+        If SlotSettings Is Nothing OrElse Not HasLegacyDisplayModeZui() Then Return
+        Dim orIx As Integer = FindInputIndexByNickName("Or")
+        Dim ftIx As Integer = FindInputIndexByNickName("Ft")
+        Dim oaIx As Integer = FindInputIndexByNickName("Oa")
+        Dim orOn As Boolean? = ReadOptionalBoolInput(DA, orIx)
+        Dim ftOn As Boolean? = ReadOptionalBoolInput(DA, ftIx)
+        Dim oaOn As Boolean? = ReadOptionalBoolInput(DA, oaIx)
+        Dim mode As Integer = ModeValueAtt
+        If orOn.HasValue AndAlso orOn.Value Then
+            mode = 2
+        ElseIf ftOn.HasValue AndAlso ftOn.Value Then
+            mode = 4
+        ElseIf oaOn.HasValue AndAlso oaOn.Value Then
+            mode = 1
+        ElseIf (orOn.HasValue AndAlso Not orOn.Value) OrElse (ftOn.HasValue AndAlso Not ftOn.Value) OrElse (oaOn.HasValue AndAlso Not oaOn.Value) Then
+            mode = 0
+        End If
+        mode = ClampDisplayMode(mode)
+        For i As Integer = 0 To SlotSettings.Length - 1
+            SlotSettings(i).DisplayMode = mode
+        Next
+        ModeValueAtt = mode
+    End Sub
+
+    Private Sub BuildSlotSettings(DA As IGH_DataAccess, geom As DataTree(Of GeometryBase))
+        Dim n As Integer = If(MyGumball Is Nothing, 0, MyGumball.Count)
+        If n <= 0 Then
+            SlotSettings = Nothing
+            Return
+        End If
+        ReDim SlotSettings(n - 1)
+        For i As Integer = 0 To n - 1
+            SlotSettings(i).Active = True
+            SlotSettings(i).ApplyToAll = (ModeValueType = 1)
+            SlotSettings(i).DisplayMode = ModeValueAtt
+        Next
+
+        MapBoolTreeToSlots(DA, "Ac", geom, True, Sub(slot, v) SlotSettings(slot).Active = v)
+        MapBoolTreeToSlots(DA, "Aa", geom, ModeValueType = 1, Sub(slot, v) SlotSettings(slot).ApplyToAll = v)
+        If FindInputIndexByNickName("Dm") >= 0 Then
+            MapIntTreeToSlots(DA, "Dm", geom, ModeValueAtt, Sub(slot, v) SlotSettings(slot).DisplayMode = v)
+        ElseIf HasLegacyDisplayModeZui() Then
+            ApplyLegacyDisplayModeToSlots(DA)
+        End If
+    End Sub
+
+    Private Sub ApplyPerSlotDisplayModes()
+        If MyGumball Is Nothing OrElse SlotSettings Is Nothing Then Return
+        If IsLiveGripDragActive() Then Return
+        For i As Integer = 0 To Math.Min(MyGumball.Count, SlotSettings.Length) - 1
+            MyGumball.ApplyAppearancePresetToSlot(i, SlotSettings(i).DisplayMode)
+        Next
+    End Sub
+
+    Private Sub ApplyGlobalZuiInputs(DA As IGH_DataAccess)
+        ApplyAlignSnapModesFromInputs(DA)
+        ApplyBoolInput(DA, FindInputIndexByNickName("Pr"), PreserveTransformsOnGeometryChange, False)
+        ApplyBoolInput(DA, FindInputIndexByNickName("Px"), ProximityCache, False)
+        ApplyBoolInput(DA, FindInputIndexByNickName("Ss"), SaveShifted, False)
+        ApplyBoolInput(DA, FindInputIndexByNickName("Lv"), LiveTransformsWhileDragging, False)
+
+        Dim ccIx As Integer = FindInputIndexByNickName("Cc")
+        If ccIx >= 0 AndAlso Params.Input(ccIx).SourceCount > 0 Then
+            Dim pulse As Boolean = False
+            If DA.GetData(ccIx, pulse) Then
+                If pulse AndAlso Not _clearCacheInputPrev Then ClearGumballCacheInternal()
+                _clearCacheInputPrev = pulse
+            End If
+        Else
+            _clearCacheInputPrev = False
+        End If
+    End Sub
+
+    Private Sub ApplyZuiBooleanInputs(DA As IGH_DataAccess)
+        ApplyApplyToAllFromInputs(DA)
+        ApplyGlobalZuiInputs(DA)
+    End Sub
+
+    Private Sub ApplyAlignSnapModesFromInputs(DA As IGH_DataAccess)
+        Dim aIx As Integer = FindInputIndexByNickName("A")
+        If aIx >= 0 Then
+            ModeValueAlign = Params.Input(aIx).SourceCount > 0 AndAlso Params.Input(aIx).VolatileDataCount > 0
+        End If
+        Dim sIx As Integer = FindInputIndexByNickName("S")
+        If sIx >= 0 Then
+            ModeValueSnap = Params.Input(sIx).SourceCount > 0 AndAlso Params.Input(sIx).VolatileDataCount > 0
+        End If
+    End Sub
+
+    Private Sub ClearGumballCacheInternal()
         Me.Cache.Clear()
+        ShiftedGumballEntries.Clear()
         If (MyGumball IsNot Nothing) Then MyGumball.Dispose()
         Me.MyGumball = Nothing
         Me.ClearData()
         Me.ExpireSolution(True)
     End Sub
 
-    Private Sub Menu_ProximityCache()
-        If (MyGumball IsNot Nothing) Then Me.RecordUndoEvent("Proximity cache", New GbUndo(Me.MyGumball))
-        Me.ProximityCache = Not Me.ProximityCache
+#End Region
+
+#Region "Variable parameters (canvas ZUI)"
+
+    Public Function CanInsertParameter(side As GH_ParameterSide, index As Integer) As Boolean Implements IGH_VariableParameterComponent.CanInsertParameter
+        If side <> GH_ParameterSide.Input Then Return False
+        Return KindToInsertAt(index) <> ZuiOptionalKind.None
+    End Function
+
+    Public Function CanRemoveParameter(side As GH_ParameterSide, index As Integer) As Boolean Implements IGH_VariableParameterComponent.CanRemoveParameter
+        If side <> GH_ParameterSide.Input Then Return False
+        Return IsRemovableZuiInput(index)
+    End Function
+
+    Public Function CreateParameter(side As GH_ParameterSide, index As Integer) As IGH_Param Implements IGH_VariableParameterComponent.CreateParameter
+        If side <> GH_ParameterSide.Input Then Return Nothing
+        Dim kind As ZuiOptionalKind = KindToInsertAt(index)
+        If kind = ZuiOptionalKind.None Then Return Nothing
+        Return CreateZuiParam(kind)
+    End Function
+
+    Public Function DestroyParameter(side As GH_ParameterSide, index As Integer) As Boolean Implements IGH_VariableParameterComponent.DestroyParameter
+        If side = GH_ParameterSide.Input AndAlso index >= BaseInputCount AndAlso index < Params.Input.Count Then
+            Dim nick As String = Params.Input(index).NickName
+            If String.Equals(nick, "A", StringComparison.OrdinalIgnoreCase) AndAlso MyGumball IsNot Nothing Then
+                MyGumball.ClearAllSlotAlign()
+            ElseIf String.Equals(nick, "S", StringComparison.OrdinalIgnoreCase) AndAlso MyGumball IsNot Nothing Then
+                MyGumball.DisposeSnapTranslateTargets()
+            End If
+        End If
+        Return True
+    End Function
+
+    Public Sub VariableParameterMaintenance() Implements IGH_VariableParameterComponent.VariableParameterMaintenance
+        SyncFeatureFlagsFromInputs()
     End Sub
 
-    Private Sub Menu_PreserveOnChanges()
-        If (MyGumball IsNot Nothing) Then Me.RecordUndoEvent("Preserve on changes", New GbUndo(Me.MyGumball))
-        Me.PreserveTransformsOnGeometryChange = Not Me.PreserveTransformsOnGeometryChange
-    End Sub
-
-    Private Sub Menu_LiveTransformsWhileDragging()
-        If (MyGumball IsNot Nothing) Then Me.RecordUndoEvent("Live (while dragging)", New GbUndo(Me.MyGumball))
-        Me.LiveTransformsWhileDragging = Not Me.LiveTransformsWhileDragging
-    End Sub
 #End Region
 
     Private Function FindInputIndexByNickName(nick As String) As Integer
@@ -309,81 +958,7 @@ Public Class GumballComp
     End Function
 
     Private Sub SyncSecondaryInputs()
-        Dim changed As Boolean
-        Do
-            changed = False
-            For i As Integer = Params.Input.Count - 1 To 1 Step -1
-                Dim p As IGH_Param = Params.Input(i)
-                Dim nick As String = p.NickName
-                If String.Equals(nick, "A", StringComparison.OrdinalIgnoreCase) AndAlso Not ModeValueAlign Then
-                    If MyGumball IsNot Nothing Then
-                        MyGumball.GeometrytoAlign = Nothing
-                        MyGumball.ClearAlignAxisReference()
-                    End If
-                    p.RemoveAllSources()
-                    Params.UnregisterInputParameter(p)
-                    changed = True
-                    Exit For
-                End If
-                If String.Equals(nick, "t", StringComparison.OrdinalIgnoreCase) AndAlso Not ModeValueSnap Then
-                    p.RemoveAllSources()
-                    Params.UnregisterInputParameter(p)
-                    changed = True
-                    Exit For
-                End If
-                If String.Equals(nick, "S", StringComparison.OrdinalIgnoreCase) AndAlso Not ModeValueSnap Then
-                    If MyGumball IsNot Nothing Then MyGumball.DisposeSnapTranslateTargets()
-                    p.RemoveAllSources()
-                    Params.UnregisterInputParameter(p)
-                    changed = True
-                    Exit For
-                End If
-            Next
-        Loop While changed
-
-        Dim hasA As Boolean = FindInputIndexByNickName("A") >= 0
-        Dim hasS As Boolean = FindInputIndexByNickName("S") >= 0
-
-        If ModeValueAlign AndAlso Not hasA Then
-            Dim pa As New Grasshopper.Kernel.Parameters.Param_Geometry With {
-                .Optional = True,
-                .Name = "Geometry to align",
-                .NickName = "A",
-                .Description = "Plane (exact X/Y/Z axis reference) or other geometry to orient gumball axes.",
-                .Access = GH_ParamAccess.item
-            }
-            Dim insertA As Integer = If(hasS, FindInputIndexByNickName("S"), Params.Input.Count)
-            If insertA < 0 Then insertA = 1
-            Params.RegisterInputParam(pa, insertA)
-            Params.OnParametersChanged()
-        End If
-
-        hasS = FindInputIndexByNickName("S") >= 0
-        If ModeValueSnap AndAlso Not hasS Then
-            Dim ps As New Grasshopper.Kernel.Parameters.Param_Geometry With {
-                .Optional = True,
-                .Name = "Snap target",
-                .NickName = "S",
-                .Description = "Geometry to snap to while translating gumball grips.",
-                .Access = GH_ParamAccess.tree
-            }
-            Params.RegisterInputParam(ps, Params.Input.Count)
-            Params.OnParametersChanged()
-        End If
-
-        Dim hasT As Boolean = FindInputIndexByNickName("t") >= 0
-        If ModeValueSnap AndAlso Not hasT Then
-            Dim pTol As New Grasshopper.Kernel.Parameters.Param_Number With {
-                .Optional = True,
-                .Name = "Snap tolerance",
-                .NickName = "t",
-                .Description = "Maximum snap distance (model units). Leave empty for automatic (~220× document tolerance, minimum 0.02).",
-                .Access = GH_ParamAccess.item
-            }
-            Params.RegisterInputParam(pTol, Params.Input.Count)
-            Params.OnParametersChanged()
-        End If
-
+        SyncOptionalInputsFromFlags()
         Me.ExpireSolution(True)
     End Sub
 
@@ -391,42 +966,65 @@ Public Class GumballComp
     Friend Sub ApplyOptionalInputModesFromFile(alignGeometry As Boolean, snapToGeometry As Boolean)
         ModeValueAlign = alignGeometry
         ModeValueSnap = snapToGeometry
-        SyncSecondaryInputs()
+        SyncOptionalInputsFromFlags()
     End Sub
 
-    Private Sub RefreshSnapTranslateTargets(DA As IGH_DataAccess)
+    Private Sub RefreshSnapTranslateTargets(DA As IGH_DataAccess, geom As DataTree(Of GeometryBase))
         If MyGumball Is Nothing Then Return
         MyGumball.DisposeSnapTranslateTargets()
-        MyGumball.SnapTranslateRadiusOverride = Double.NaN
-        If Not ModeValueSnap Then Return
-
-        Dim tIx As Integer = FindInputIndexByNickName("t")
-        If tIx >= 0 AndAlso Params.Input(tIx).VolatileDataCount > 0 Then
-            Dim tolNum As Grasshopper.Kernel.Types.GH_Number = Nothing
-            If DA.GetData(tIx, tolNum) AndAlso tolNum IsNot Nothing Then
-                Try
-                    If tolNum.IsValid Then
-                        Dim tv As Double = tolNum.Value
-                        If tv > 0 Then MyGumball.SnapTranslateRadiusOverride = tv
-                    End If
-                Catch
-                End Try
-            End If
+        If Not Double.IsNaN(SnapTranslateTolerance) AndAlso SnapTranslateTolerance > 0 Then
+            MyGumball.SnapTranslateRadiusOverride = SnapTranslateTolerance
+        Else
+            MyGumball.SnapTranslateRadiusOverride = Double.NaN
         End If
+        If Not ModeValueSnap Then Return
 
         Dim ix As Integer = FindInputIndexByNickName("S")
         If ix < 0 OrElse Params.Input(ix).VolatileDataCount = 0 Then Return
-        Dim data As New GH_Structure(Of Types.IGH_GeometricGoo)
-        If Not DA.GetDataTree(ix, data) Then Return
-        Dim list As New List(Of GeometryBase)
-        For Each b As GH_Path In data.Paths
-            For Each d As Types.IGH_GeometricGoo In data.Branch(b)
-                If d Is Nothing Then Continue For
-                Dim gb As GeometryBase = GH_Convert.ToGeometryBase(d)
-                If gb IsNot Nothing Then list.Add(gb.Duplicate())
+        If _leafToGumballSlot Is Nothing OrElse geom Is Nothing OrElse geom.DataCount = 0 Then Return
+
+        Dim snapTree As New GH_Structure(Of Types.IGH_GeometricGoo)
+        If Not DA.GetDataTree(ix, snapTree) Then Return
+
+        Dim broadcastGoo As Types.IGH_GeometricGoo = Nothing
+        Dim useBroadcast As Boolean = False
+        If snapTree.DataCount = 1 Then
+            useBroadcast = True
+            broadcastGoo = snapTree.AllData(True).FirstOrDefault()
+        End If
+
+        Dim perSlot(MyGumball.Count - 1) As List(Of GeometryBase)
+        Dim leafIx As Integer = 0
+        For bi As Integer = 0 To geom.BranchCount - 1
+            Dim path As GH_Path = geom.Paths(bi)
+            Dim valueBranch As IList(Of Types.IGH_GeometricGoo) = Nothing
+            If Not useBroadcast AndAlso snapTree.PathExists(path) Then valueBranch = snapTree.Branch(path)
+            For j As Integer = 0 To geom.Branch(bi).Count - 1
+                If leafIx < _leafToGumballSlot.Length Then
+                    Dim slot As Integer = _leafToGumballSlot(leafIx)
+                    If slot >= 0 AndAlso slot < MyGumball.Count Then
+                        Dim gg As Types.IGH_GeometricGoo = Nothing
+                        If useBroadcast Then
+                            gg = broadcastGoo
+                        ElseIf valueBranch IsNot Nothing AndAlso j < valueBranch.Count Then
+                            gg = valueBranch(j)
+                        End If
+                        AppendSnapGooToSlot(perSlot, slot, gg)
+                    End If
+                End If
+                leafIx += 1
             Next
         Next
-        If list.Count > 0 Then MyGumball.SnapTranslateTargets = list
+
+        MyGumball.SlotSnapTranslateTargets = perSlot
+    End Sub
+
+    Private Shared Sub AppendSnapGooToSlot(perSlot As List(Of GeometryBase)(), slot As Integer, gg As Types.IGH_GeometricGoo)
+        If gg Is Nothing OrElse perSlot Is Nothing OrElse slot < 0 OrElse slot >= perSlot.Length Then Return
+        Dim gb As GeometryBase = GH_Convert.ToGeometryBase(gg)
+        If gb Is Nothing Then Return
+        If perSlot(slot) Is Nothing Then perSlot(slot) = New List(Of GeometryBase)
+        perSlot(slot).Add(gb.Duplicate())
     End Sub
 
     Public Property ModeValue(ByVal index As Integer) As Integer
@@ -465,7 +1063,7 @@ Public Class GumballComp
 
                     Me.ExpireSolution(True)
                 Case 1
-                    ModeValueAtt = value
+                    ApplyModeValueAtt(ClampDisplayMode(value))
                 Case 2
                     ModeValueAlign = value
                     SyncSecondaryInputs()
@@ -483,6 +1081,9 @@ Public Class GumballComp
     Private Paths As GH_Path()
     ''' <summary>Parallel to flattened input leaves: index into MyGumball geometry/Xform (-1 means null input at that leaf).</summary>
     Private _leafToGumballSlot As Integer()
+    ''' <summary>Maximum snap distance while translating (model units); NaN = automatic from document tolerance.</summary>
+    Public SnapTranslateTolerance As Double = Double.NaN
+
     Public AttForm As FormAttributes = Nothing
     Private MyGumballAttributes As Integer() = New Integer(9) {1, 1, 2, 1, 1, 50, 5, 2, 15, 35}
 
@@ -531,6 +1132,105 @@ Public Class GumballComp
 
     Private _proximityCacheOnGeometryChange As Boolean = False
 
+    ''' <summary>When proximity cache is on, remember transforms for geometry that leaves the list and restore when it returns.</summary>
+    Public Property SaveShifted As Boolean
+        Get
+            Return _saveShiftedGumballTransforms
+        End Get
+        Set(value As Boolean)
+            _saveShiftedGumballTransforms = value
+        End Set
+    End Property
+
+    Private _saveShiftedGumballTransforms As Boolean = False
+
+    Friend ShiftedGumballEntries As New List(Of ShiftedGumballEntry)
+
+    Private Shared Function CloneGhTransform(src As Types.GH_Transform) As Types.GH_Transform
+        Dim result As New Types.GH_Transform()
+        If src Is Nothing Then Return result
+        For Each t As Grasshopper.Kernel.Types.Transforms.ITransform In src.CompoundTransforms
+            result.CompoundTransforms.Add(t.Duplicate())
+        Next
+        result.ClearCaches()
+        Return result
+    End Function
+
+    Private Shared Function HasMeaningfulXform(xf As Types.GH_Transform) As Boolean
+        Return xf IsNot Nothing AndAlso xf.CompoundTransforms IsNot Nothing AndAlso xf.CompoundTransforms.Count > 0
+    End Function
+
+    Private Sub AddShiftedGumballEntry(key As GeometryProximityKey, xf As Types.GH_Transform)
+        For Each existing As ShiftedGumballEntry In ShiftedGumballEntries
+            If ProximityMatching.ShiftedKeyMatchesCandidate(existing.Key, key) Then Return
+        Next
+        ShiftedGumballEntries.Add(New ShiftedGumballEntry With {
+            .Key = key,
+            .Xform = CloneGhTransform(xf)
+        })
+    End Sub
+
+    Private Sub RemoveShiftedGumballEntriesMatching(key As GeometryProximityKey)
+        ShiftedGumballEntries.RemoveAll(Function(e) ProximityMatching.ShiftedKeyMatchesCandidate(e.Key, key))
+    End Sub
+
+    Friend Sub RememberShiftedGumballTransforms(oldGb As GhGumball, oldCacheGeoms As GeometryBase(), newGeoms As GeometryBase(), slotMap As Integer())
+        If oldGb Is Nothing OrElse oldCacheGeoms Is Nothing OrElse newGeoms Is Nothing Then Return
+        Dim nOld As Integer = Math.Min(oldGb.Count, oldCacheGeoms.Length)
+        Dim matchedOld As New HashSet(Of Integer)
+        If slotMap IsNot Nothing Then
+            For Each oldIx As Integer In slotMap
+                If oldIx >= 0 Then matchedOld.Add(oldIx)
+            Next
+        End If
+        For oi As Integer = 0 To nOld - 1
+            If matchedOld.Contains(oi) Then
+                Dim ka As GeometryProximityKey = Nothing
+                If ProximityMatching.TryGetProximityKey(oldCacheGeoms(oi), ka) Then
+                    If ProximityMatching.OldGeometryStillInList(oldCacheGeoms, oi, newGeoms) Then
+                        RemoveShiftedGumballEntriesMatching(ka)
+                    End If
+                End If
+                Continue For
+            End If
+            If oi >= oldGb.Count OrElse Not HasMeaningfulXform(oldGb.Xform(oi)) Then Continue For
+            Dim key As GeometryProximityKey = Nothing
+            If Not ProximityMatching.TryGetProximityKey(oldCacheGeoms(oi), key) Then Continue For
+            If ProximityMatching.OldGeometryStillInList(oldCacheGeoms, oi, newGeoms) Then
+                RemoveShiftedGumballEntriesMatching(key)
+            Else
+                AddShiftedGumballEntry(key, oldGb.Xform(oi))
+            End If
+        Next
+    End Sub
+
+    Friend Sub ApplyShiftedGumballTransforms(gb As GhGumball, newGeoms As GeometryBase(), slotMap As Integer())
+        If gb Is Nothing OrElse newGeoms Is Nothing OrElse ShiftedGumballEntries.Count = 0 Then Return
+        Dim usedSaved As New HashSet(Of Integer)
+        For j As Integer = 0 To Math.Min(gb.Count, newGeoms.Length) - 1
+            If slotMap IsNot Nothing AndAlso j < slotMap.Length AndAlso slotMap(j) >= 0 Then Continue For
+            If HasMeaningfulXform(gb.Xform(j)) Then Continue For
+            Dim kb As GeometryProximityKey = Nothing
+            If Not ProximityMatching.TryGetProximityKey(newGeoms(j), kb) Then Continue For
+            For si As Integer = 0 To ShiftedGumballEntries.Count - 1
+                If usedSaved.Contains(si) Then Continue For
+                If Not ProximityMatching.ShiftedKeyMatchesCandidate(ShiftedGumballEntries(si).Key, kb) Then Continue For
+                gb.Xform(j) = CloneGhTransform(ShiftedGumballEntries(si).Xform)
+                GhGumball.ApplyCompoundGenericTransformsInOrder(gb.Geometry(j), gb.Xform(j))
+                gb.RebuildGumballObjectAndConduitAt(j)
+                usedSaved.Add(si)
+                Exit For
+            Next
+        Next
+        If usedSaved.Count > 0 Then
+            Dim remaining As New List(Of ShiftedGumballEntry)
+            For si As Integer = 0 To ShiftedGumballEntries.Count - 1
+                If Not usedSaved.Contains(si) Then remaining.Add(ShiftedGumballEntries(si))
+            Next
+            ShiftedGumballEntries = remaining
+        End If
+    End Sub
+
     Private Shared Function TryUnpackAlignPlaneFromGoo(gg As Types.IGH_GeometricGoo, ByRef pl As Plane) As Boolean
         Dim ghp As GH_Plane = TryCast(gg, GH_Plane)
         If ghp IsNot Nothing AndAlso ghp.IsValid Then
@@ -554,48 +1254,70 @@ Public Class GumballComp
         Return True
     End Function
 
-    Private Sub ApplyAlignGeometryInput(DA As IGH_DataAccess)
+    Private Sub ApplyAlignGeometryInput(DA As IGH_DataAccess, geom As DataTree(Of GeometryBase))
         Dim apIx As Integer = FindInputIndexByNickName("A")
         If apIx < 0 OrElse MyGumball Is Nothing OrElse Not ModeValueAlign Then Return
+        If IsLiveGripDragActive() Then Return
+
         If Params.Input(apIx).VolatileDataCount = 0 Then
-            MyGumball.ClearAlignAxisReference()
+            MyGumball.ClearAllSlotAlign()
             MyGumball.GeometrytoAlign = Nothing
-            Return
-        End If
-        Dim gg As Types.IGH_GeometricGoo = Nothing
-        If Not DA.GetData(apIx, gg) OrElse gg Is Nothing Then Return
-
-        ' Re-running axis/geometry alignment resets GumballDisplayConduit bases and destroys in-progress GumballTransform.
-        ' During Live + grip drag, SolveInstance would do that every Expire — preview stays on the widget only.
-        If LiveTransformsWhileDragging AndAlso MyGumball.PreviewGripSlot >= 0 AndAlso Not (MyGumball.PreviewGripDelta = Transform.Identity) Then
+            MyGumball.ClearAlignAxisReference()
             Return
         End If
 
+        Dim alignTree As New GH_Structure(Of Types.IGH_GeometricGoo)
+        If Not DA.GetDataTree(apIx, alignTree) Then Return
+
+        Dim broadcastGoo As Types.IGH_GeometricGoo = Nothing
+        Dim useBroadcast As Boolean = False
+        If alignTree.DataCount = 1 Then
+            useBroadcast = True
+            broadcastGoo = alignTree.AllData(True).FirstOrDefault()
+        End If
+
+        Dim slotHasAlign(MyGumball.Count - 1) As Boolean
+        Dim leafIx As Integer = 0
+        For bi As Integer = 0 To geom.BranchCount - 1
+            Dim path As GH_Path = geom.Paths(bi)
+            Dim valueBranch As IList(Of Types.IGH_GeometricGoo) = Nothing
+            If Not useBroadcast AndAlso alignTree.PathExists(path) Then valueBranch = alignTree.Branch(path)
+            For j As Integer = 0 To geom.Branch(bi).Count - 1
+                If leafIx < _leafToGumballSlot.Length Then
+                    Dim slot As Integer = _leafToGumballSlot(leafIx)
+                    If slot >= 0 AndAlso slot < MyGumball.Count Then
+                        Dim gg As Types.IGH_GeometricGoo = Nothing
+                        If useBroadcast Then
+                            gg = broadcastGoo
+                        ElseIf valueBranch IsNot Nothing AndAlso j < valueBranch.Count Then
+                            gg = valueBranch(j)
+                        End If
+                        If gg IsNot Nothing Then
+                            ApplyAlignGooToSlot(slot, gg)
+                            slotHasAlign(slot) = True
+                        End If
+                    End If
+                End If
+                leafIx += 1
+            Next
+        Next
+
+        For i As Integer = 0 To MyGumball.Count - 1
+            If Not slotHasAlign(i) Then MyGumball.ClearSlotAlign(i)
+        Next
+        SyncGumballVisibility()
+    End Sub
+
+    Private Sub ApplyAlignGooToSlot(slot As Integer, gg As Types.IGH_GeometricGoo)
+        If MyGumball Is Nothing OrElse gg Is Nothing Then Return
         Dim axisPl As New Plane
         If TryUnpackAlignPlaneFromGoo(gg, axisPl) Then
-            If Not MyGumball.HasAlignAxisReferencePlane OrElse Not AlignAxisFramesEqual(MyGumball.AlignAxisReferencePlane, axisPl) Then
-                MyGumball.SetAlignToAxisReference(axisPl)
-                If Attributes.Selected Then MyGumball.ShowGumballs()
-            End If
+            MyGumball.SetSlotAlignAxis(slot, axisPl)
             Return
         End If
-
-        MyGumball.ClearAlignAxisReference()
         Dim gbAlign As GeometryBase = GH_Convert.ToGeometryBase(gg)
         If gbAlign Is Nothing Then Return
-        Dim g As GeometryBase = gbAlign.Duplicate()
-        If MyGumball.GeometrytoAlign Is Nothing Then
-            MyGumball.AlignToGeometry(g)
-        Else
-            Dim gtree As New DataTree(Of GeometryBase)
-            gtree.Add(g, New GH_Path(0))
-            Dim atree As New DataTree(Of GeometryBase)
-            atree.Add(MyGumball.GeometrytoAlign, New GH_Path(0))
-            If Not AreEquals(gtree, atree) Then
-                MyGumball.AlignToGeometry(g)
-                If Attributes.Selected Then MyGumball.ShowGumballs()
-            End If
-        End If
+        MyGumball.SetSlotAlignGeometry(slot, gbAlign.Duplicate())
     End Sub
 
     Protected Overrides Sub SolveInstance(DA As IGH_DataAccess)
@@ -604,6 +1326,9 @@ Public Class GumballComp
 
         'Get input data.
         If Not (DA.GetDataTree(0, Data)) Then Exit Sub
+
+        ' Global ZUI flags (per-item inputs are resolved after geometry slots exist).
+        ApplyGlobalZuiInputs(DA)
 
         ' Align input is applied after MyGumball exists (see ApplyAlignGeometryInput).
 
@@ -624,6 +1349,8 @@ Public Class GumballComp
         Next
 
         Dim nonNullGeom As New List(Of GeometryBase)(InputData.DataCount)
+        Dim newSlotPaths As New List(Of GH_Path)
+        Dim newSlotBranch As New List(Of Integer)
         Dim leafCount As Integer = InputData.DataCount
         If leafCount = 0 Then
             _leafToGumballSlot = Nothing
@@ -640,6 +1367,8 @@ Public Class GumballComp
                         dup.MakeDeformable()
                         _leafToGumballSlot(leafIx) = nonNullGeom.Count
                         nonNullGeom.Add(dup)
+                        newSlotPaths.Add(InputData.Paths(bi))
+                        newSlotBranch.Add(lj)
                     End If
                     leafIx += 1
                 Next
@@ -650,12 +1379,15 @@ Public Class GumballComp
         'Set cache.
         If (Cache.DataCount = 0) Then
             SetCache(InputData)
+            If ProximityCache AndAlso SaveShifted AndAlso MyGumball IsNot Nothing AndAlso nonNullGeom.Count > 0 Then
+                ApplyShiftedGumballTransforms(MyGumball, nonNullGeom.ToArray(), Nothing)
+            End If
         Else
             'Test if new inputdata
             If Not (AreEquals(Cache, InputData)) Then
                 Dim resynced As GhGumball = Nothing
                 If ProximityCache AndAlso MyGumball IsNot Nothing AndAlso nonNullGeom.Count > 0 Then
-                    resynced = GhGumball.CreateResyncPreservingTransformsProximity(nonNullGeom.ToArray(), Me, MyGumball, Cache)
+                    resynced = GhGumball.CreateResyncPreservingTransformsProximity(nonNullGeom.ToArray(), Me, MyGumball, Cache, newSlotPaths, newSlotBranch)
                 ElseIf PreserveTransformsOnGeometryChange AndAlso MyGumball IsNot Nothing AndAlso nonNullGeom.Count > 0 Then
                     resynced = GhGumball.CreateResyncPreservingTransforms(nonNullGeom.ToArray(), Me, MyGumball)
                 End If
@@ -666,8 +1398,10 @@ Public Class GumballComp
                 If resynced IsNot Nothing Then
                     MyGumball = resynced
                     If Me.ModeValue(2) Then MyGumball.ReapplyStoredAlignment()
-                    If (Me.Attributes.Selected) Then MyGumball.ShowGumballs()
+                    SyncGumballVisibility()
                 End If
+            ElseIf ProximityCache AndAlso SaveShifted AndAlso MyGumball IsNot Nothing AndAlso nonNullGeom.Count > 0 Then
+                ApplyShiftedGumballTransforms(MyGumball, nonNullGeom.ToArray(), Nothing)
             End If
         End If
 
@@ -679,11 +1413,16 @@ Public Class GumballComp
             End If
         ElseIf (MyGumball Is Nothing) Then
             MyGumball = New GhGumball(nonNullGeom.ToArray(), Me)
-            If (Me.Attributes.Selected) Then MyGumball.ShowGumballs()
+            SyncGumballVisibility()
+            If ProximityCache AndAlso SaveShifted AndAlso ShiftedGumballEntries.Count > 0 Then
+                ApplyShiftedGumballTransforms(MyGumball, nonNullGeom.ToArray(), Nothing)
+            End If
         End If
 
-        ApplyAlignGeometryInput(DA)
-        RefreshSnapTranslateTargets(DA)
+        ApplyAlignGeometryInput(DA, InputData)
+        RefreshSnapTranslateTargets(DA, InputData)
+        BuildSlotSettings(DA, InputData)
+        ApplyPerSlotDisplayModes()
 
         'Set output data (null leaves pass through unchanged on both outputs).
         Dim DataOutput As New GH_Structure(Of Types.IGH_GeometricGoo)
@@ -702,7 +1441,7 @@ Public Class GumballComp
                         Dim pSlot As Integer = MyGumball.PreviewGripSlot
                         Dim liveD As Transform = MyGumball.PreviewGripDelta
 
-                        Select Case ModeValue(0)
+                        Select Case EffectiveTransformMode(pSlot)
 
                             Case 1 ' Apply to all — preview transforms every slot equally.
                                 Dim gx As GeometryBase = MyGumball.Geometry(slot).Duplicate()
@@ -738,6 +1477,7 @@ Public Class GumballComp
         DA.SetDataTree(0, DataOutput)
         DA.SetDataTree(1, DataOutput2)
 
+        SyncGumballVisibility()
     End Sub
 
     Private Shared Function ComposeGhTransformAppendGeneric(baseXf As Grasshopper.Kernel.Types.GH_Transform, generic As Transform) As Grasshopper.Kernel.Types.GH_Transform
@@ -912,10 +1652,48 @@ Public Class GumballComp
         If MyGumball IsNot Nothing AndAlso MyGumball.IsRuntimeStateCompleteForSerialization() Then
             MyGumball.GumballWriter(writer)
         End If
+        writer.SetBoolean("GB_SaveShifted", Me.SaveShifted)
+        writer.SetInt32("GB_ShiftedCount", ShiftedGumballEntries.Count)
+        For i As Integer = 0 To ShiftedGumballEntries.Count - 1
+            Dim entry As ShiftedGumballEntry = ShiftedGumballEntries(i)
+            writer.SetInt32("GB_ShiftedType", i, entry.Key.ObjectType)
+            writer.SetDouble("GB_ShiftedCx", i, entry.Key.Center.X)
+            writer.SetDouble("GB_ShiftedCy", i, entry.Key.Center.Y)
+            writer.SetDouble("GB_ShiftedCz", i, entry.Key.Center.Z)
+            writer.SetDouble("GB_ShiftedDiag", i, entry.Key.Diagonal)
+            Dim xfChunk As GH_IO.Serialization.GH_IWriter = writer.CreateChunk("GB_ShiftedXf", i)
+            entry.Xform.Write(xfChunk)
+        Next
         Return MyBase.Write(writer)
     End Function
 
     Public Overrides Function Read(ByVal reader As GH_IO.Serialization.GH_IReader) As Boolean
+
+        Dim loadedSaveShifted As Boolean = False
+        If reader.TryGetBoolean("GB_SaveShifted", loadedSaveShifted) Then
+            Me.SaveShifted = loadedSaveShifted
+        End If
+        ShiftedGumballEntries.Clear()
+        Dim shiftedCount As Integer = 0
+        If reader.TryGetInt32("GB_ShiftedCount", shiftedCount) AndAlso shiftedCount > 0 Then
+            For i As Integer = 0 To shiftedCount - 1
+                Dim entry As New ShiftedGumballEntry
+                entry.Key.ObjectType = reader.GetInt32("GB_ShiftedType", i)
+                entry.Key.Center = New Point3d(
+                    reader.GetDouble("GB_ShiftedCx", i),
+                    reader.GetDouble("GB_ShiftedCy", i),
+                    reader.GetDouble("GB_ShiftedCz", i))
+                entry.Key.Diagonal = reader.GetDouble("GB_ShiftedDiag", i)
+                Dim xfChunk As GH_IO.Serialization.GH_IReader = reader.FindChunk("GB_ShiftedXf", i)
+                If xfChunk IsNot Nothing Then
+                    entry.Xform = New Types.GH_Transform()
+                    entry.Xform.Read(xfChunk)
+                Else
+                    entry.Xform = New Types.GH_Transform()
+                End If
+                If entry.Key.Center.IsValid Then ShiftedGumballEntries.Add(entry)
+            Next
+        End If
 
         If Not GhGumball.GhClipboardRootLooksComplete(reader) Then
             Return MyBase.Read(reader)
@@ -946,6 +1724,12 @@ Public Class GumballComp
 
 End Class
 
+''' <summary>Gumball transform saved when its geometry leaves the input list (Save shifted).</summary>
+Friend Structure ShiftedGumballEntry
+    Public Key As GeometryProximityKey
+    Public Xform As Types.GH_Transform
+End Structure
+
 Public Class GumballCompAtt
     Inherits Grasshopper.Kernel.Attributes.GH_ComponentAttributes
 
@@ -963,27 +1747,8 @@ Public Class GumballCompAtt
 
         Set(value As Boolean)
 
-            If (MyOwner.MyGumball IsNot Nothing) Then
-
-                If Not (MyOwner.Hidden) AndAlso Not (MyOwner.Locked) Then
-
-                    If (MyBase.Selected) Then
-                        If Not (value) Then
-                            MyOwner.MyGumball.HideGumballs()
-                        End If
-                    Else
-                        If (value) Then
-                            MyOwner.MyGumball.ShowGumballs()
-                        End If
-                    End If
-
-                Else
-                    MyOwner.MyGumball.HideGumballs()
-                End If
-                If (MyOwner.Params.Input(0).VolatileData.DataCount = 0) Then MyOwner.MyGumball.HideGumballs()
-            End If
-
             MyBase.Selected = value
+            MyOwner.SyncGumballVisibility()
         End Set
     End Property
 
@@ -1004,6 +1769,20 @@ Public Class GhGumball
     Public Count As Integer
     Public Component As GumballComp
     Public GeometrytoAlign As GeometryBase
+    ''' <summary>Per-slot align state (plane axis or geometry).</summary>
+    Private Enum SlotAlignKind
+        None = 0
+        Axis = 1
+        Geometry = 2
+    End Enum
+
+    Private Structure SlotAlignState
+        Public Kind As SlotAlignKind
+        Public AxisPlane As Plane
+        Public AlignGeo As GeometryBase
+    End Structure
+
+    Private SlotAlignStates As SlotAlignState()
     ''' <summary>When align is on and input A is a Plane, gumball axes match this frame; each gumball keeps its own origin.</summary>
     Public AlignAxisReferencePlane As Plane
     Public HasAlignAxisReferencePlane As Boolean
@@ -1015,20 +1794,28 @@ Public Class GhGumball
     ''' <summary>While <see cref="GumballComp.LiveTransformsWhileDragging"/> and a grip drag is active: pending conduit delta not yet committed to stored geometry / compound transforms.</summary>
     Friend PreviewGripSlot As Integer = -1
     Friend PreviewGripDelta As Transform = Transform.Identity
-    ''' <summary>Flatten duplicated geometry from optional input S — used by translator snapping during viewport drags.</summary>
-    Friend SnapTranslateTargets As List(Of GeometryBase)
-    ''' <summary>Positive: max snap distance from input t (model units); NaN: use automatic default from document tolerance.</summary>
+    ''' <summary>Per-slot snap targets from optional input S (tree matched to geometry paths).</summary>
+    Friend SlotSnapTranslateTargets As List(Of GeometryBase)()
+    ''' <summary>Positive: max snap distance from Attributes snap tol (model units); NaN: screen-pixel default.</summary>
     Friend SnapTranslateRadiusOverride As Double = Double.NaN
 
+    Friend Function SnapTargetsForSlot(slot As Integer) As List(Of GeometryBase)
+        If SlotSnapTranslateTargets Is Nothing OrElse slot < 0 OrElse slot >= SlotSnapTranslateTargets.Length Then Return Nothing
+        Return SlotSnapTranslateTargets(slot)
+    End Function
+
     Friend Sub DisposeSnapTranslateTargets()
-        If SnapTranslateTargets Is Nothing Then Return
-        For Each g As GeometryBase In SnapTranslateTargets
-            Try
-                g.Dispose()
-            Catch
-            End Try
+        If SlotSnapTranslateTargets Is Nothing Then Return
+        For Each lst As List(Of GeometryBase) In SlotSnapTranslateTargets
+            If lst Is Nothing Then Continue For
+            For Each g As GeometryBase In lst
+                Try
+                    g.Dispose()
+                Catch
+                End Try
+            Next
         Next
-        SnapTranslateTargets = Nothing
+        SlotSnapTranslateTargets = Nothing
     End Sub
 
     ''' <summary>Gumball is safe to clipboard-serialize only when SolveInstance built all parallel arrays consistently.</summary>
@@ -1103,6 +1890,12 @@ Public Class GhGumball
         GeometrytoAlign = Nothing
         HasAlignAxisReferencePlane = False
         AlignAxisReferencePlane = Plane.Unset
+        If SlotAlignStates IsNot Nothing Then
+            For i As Integer = 0 To SlotAlignStates.Length - 1
+                ClearSlotAlignStateOnly(i)
+            Next
+        End If
+        SlotAlignStates = Nothing
     End Sub
 
 #Region "New/Show/Hide/Dispose"
@@ -1115,6 +1908,8 @@ Public Class GhGumball
         Conduits = New Rhino.UI.Gumball.GumballDisplayConduit(Count - 1) {}
         Gumballs = New Rhino.UI.Gumball.GumballObject(Count - 1) {}
         Appearances = New Rhino.UI.Gumball.GumballAppearanceSettings(Count - 1) {}
+        ReDim SlotAlignStates(Count - 1)
+        ReDim SlotSnapTranslateTargets(Count - 1)
 
         For i As Int32 = 0 To Count - 1
             Xform(i) = New Grasshopper.Kernel.Types.GH_Transform()
@@ -1205,23 +2000,52 @@ Public Class GhGumball
     End Function
 
     ''' <summary>
-    ''' Like <see cref="CreateResyncPreservingTransforms"/>, but each new slot takes transforms from the prior gumball entry whose cached upstream bbox centre is nearest (same object type).
+    ''' Like <see cref="CreateResyncPreservingTransforms"/>, but each new slot takes transforms from the prior gumball entry whose cached upstream bbox centre is nearest (same object type), within proximity tolerance.
     ''' </summary>
-    Friend Shared Function CreateResyncPreservingTransformsProximity(newGeoms As GeometryBase(), comp As GumballComp, oldGb As GhGumball, oldCache As DataTree(Of GeometryBase)) As GhGumball
-        Dim oldCentres As New List(Of Point3d)
-        Dim oldKinds As New List(Of Rhino.DocObjects.ObjectType)
-        ExtractNonNullBoundingBoxMeta(oldCache, oldCentres, oldKinds)
-        If oldCentres.Count <> oldGb.Count Then
-            Return CreateResyncPreservingTransforms(newGeoms, comp, oldGb)
+    Friend Shared Function CreateResyncPreservingTransformsProximity(newGeoms As GeometryBase(), comp As GumballComp, oldGb As GhGumball, oldCache As DataTree(Of GeometryBase),
+                                                                     newPaths As List(Of GH_Path), newBranch As List(Of Integer)) As GhGumball
+        Dim oldPaths As New List(Of GH_Path)
+        Dim oldBranch As New List(Of Integer)
+        ExtractSlotPathsFromCacheForResync(oldCache, oldPaths, oldBranch)
+        Dim oldCacheGeoms As GeometryBase() = ExtractCacheGeomsForResync(oldCache)
+        Dim slotMap As Integer() = ProximityMatching.BuildTransformSlotMap(oldGb.Geometry, newGeoms, oldPaths, oldBranch, newPaths, newBranch)
+        If comp.SaveShifted Then
+            comp.RememberShiftedGumballTransforms(oldGb, oldCacheGeoms, newGeoms, slotMap)
         End If
-        Return CreateResyncPreservingTransformsWithMap(newGeoms, comp, oldGb, GreedyCentroidSlotMap(oldCentres, oldKinds, newGeoms))
+        Dim gb As GhGumball = CreateResyncPreservingTransformsWithMap(newGeoms, comp, oldGb, slotMap)
+        If comp.SaveShifted Then
+            comp.ApplyShiftedGumballTransforms(gb, newGeoms, slotMap)
+        End If
+        Return gb
     End Function
 
-    Private Structure ProximityCand
-        Public Dist As Double
-        Public OldIx As Integer
-        Public NewIx As Integer
-    End Structure
+    Private Shared Sub ExtractSlotPathsFromCacheForResync(tree As DataTree(Of GeometryBase), paths As List(Of GH_Path), branch As List(Of Integer))
+        paths.Clear()
+        branch.Clear()
+        If tree Is Nothing Then Return
+        For bi As Integer = 0 To tree.BranchCount - 1
+            Dim path As GH_Path = tree.Paths(bi)
+            For j As Integer = 0 To tree.Branch(bi).Count - 1
+                If tree.Branch(bi)(j) IsNot Nothing Then
+                    paths.Add(path)
+                    branch.Add(j)
+                End If
+            Next
+        Next
+    End Sub
+
+    ''' <summary>Non-null cached upstream geometry per gumball slot (same order as <see cref="ExtractSlotPathsFromCacheForResync"/>).</summary>
+    Private Shared Function ExtractCacheGeomsForResync(tree As DataTree(Of GeometryBase)) As GeometryBase()
+        Dim geoms As New List(Of GeometryBase)
+        If tree Is Nothing Then Return geoms.ToArray()
+        For bi As Integer = 0 To tree.BranchCount - 1
+            For j As Integer = 0 To tree.Branch(bi).Count - 1
+                Dim g As GeometryBase = tree.Branch(bi)(j)
+                If g IsNot Nothing Then geoms.Add(g)
+            Next
+        Next
+        Return geoms.ToArray()
+    End Function
 
     Private Shared Function BuildIndexSlotMap(newCount As Integer, oldCount As Integer) As Integer()
         Dim map(newCount - 1) As Integer
@@ -1231,53 +2055,24 @@ Public Class GhGumball
         Return map
     End Function
 
-    Private Shared Sub ExtractNonNullBoundingBoxMeta(tree As DataTree(Of GeometryBase), centres As List(Of Point3d), kinds As List(Of Rhino.DocObjects.ObjectType))
-        For bi As Integer = 0 To tree.BranchCount - 1
-            For j As Integer = 0 To tree.Branch(bi).Count - 1
-                Dim cell As GeometryBase = tree.Branch(bi)(j)
-                If cell IsNot Nothing Then
-                    centres.Add(cell.GetBoundingBox(True).Center)
-                    kinds.Add(cell.ObjectType)
-                End If
-            Next
-        Next
-    End Sub
-
-    Private Shared Function GreedyCentroidSlotMap(oldCentres As List(Of Point3d), oldKinds As List(Of Rhino.DocObjects.ObjectType), newGeoms As GeometryBase()) As Integer()
-        Dim nNew As Integer = newGeoms.Length
-        Dim nOld As Integer = oldCentres.Count
-        Dim map As Integer() = Enumerable.Repeat(-1, nNew).ToArray()
-        If nOld = 0 OrElse nNew = 0 Then Return map
-
-        Dim cands As New List(Of ProximityCand)
-        For io As Integer = 0 To nOld - 1
-            For jn As Integer = 0 To nNew - 1
-                If oldKinds(io) = newGeoms(jn).ObjectType Then
-                    cands.Add(New ProximityCand With {
-                        .Dist = oldCentres(io).DistanceTo(newGeoms(jn).GetBoundingBox(True).Center),
-                        .OldIx = io,
-                        .NewIx = jn
-                    })
-                End If
-            Next
-        Next
-        cands.Sort(Function(a As ProximityCand, b As ProximityCand) a.Dist.CompareTo(b.Dist))
-
-        Dim usedOld As New BitArray(nOld)
-        For Each c As ProximityCand In cands
-            If Not usedOld(c.OldIx) AndAlso map(c.NewIx) < 0 Then
-                usedOld(c.OldIx) = True
-                map(c.NewIx) = c.OldIx
-            End If
-        Next
-        Return map
-    End Function
-
     Friend Shared Function CreateResyncPreservingTransformsWithMap(newGeoms As GeometryBase(), comp As GumballComp, oldGb As GhGumball, newSlotToOldSlot As Integer()) As GhGumball
         Dim gb As New GhGumball(newGeoms, comp)
         Dim clonedAtt(9) As Integer
         Array.Copy(oldGb.CustomAppearance, clonedAtt, 10)
         gb.CustomAppearance = clonedAtt
+        If oldGb.SlotAlignStates IsNot Nothing AndAlso oldGb.SlotAlignStates.Length = oldGb.Count Then
+            ReDim gb.SlotAlignStates(gb.Count - 1)
+            For j As Integer = 0 To gb.Count - 1
+                Dim oldIx As Integer = newSlotToOldSlot(j)
+                If oldIx >= 0 AndAlso oldIx < oldGb.SlotAlignStates.Length Then
+                    Dim st As SlotAlignState = oldGb.SlotAlignStates(oldIx)
+                    If st.AlignGeo IsNot Nothing Then
+                        st.AlignGeo = st.AlignGeo.Duplicate()
+                    End If
+                    gb.SlotAlignStates(j) = st
+                End If
+            Next
+        End If
         gb.GeometrytoAlign = If(oldGb.GeometrytoAlign Is Nothing, Nothing, oldGb.GeometrytoAlign.Duplicate())
         gb.HasAlignAxisReferencePlane = oldGb.HasAlignAxisReferencePlane
         gb.AlignAxisReferencePlane = oldGb.AlignAxisReferencePlane
@@ -1301,7 +2096,7 @@ Public Class GhGumball
         Return gb
     End Function
 
-    Private Shared Sub ApplyCompoundGenericTransformsInOrder(geo As GeometryBase, xf As Types.GH_Transform)
+    Friend Shared Sub ApplyCompoundGenericTransformsInOrder(geo As GeometryBase, xf As Types.GH_Transform)
         For Each t As Grasshopper.Kernel.Types.Transforms.ITransform In xf.CompoundTransforms
             Dim gen = TryCast(t, Grasshopper.Kernel.Types.Transforms.Generic)
             If gen Is Nothing Then Continue For
@@ -1309,7 +2104,7 @@ Public Class GhGumball
         Next
     End Sub
 
-    Private Sub RebuildGumballObjectAndConduitAt(i As Integer)
+    Friend Sub RebuildGumballObjectAndConduitAt(i As Integer)
         Gumballs(i).Dispose()
         Dim geo As GeometryBase = Geometry(i)
         Dim gumBall As New Rhino.UI.Gumball.GumballObject
@@ -1350,6 +2145,7 @@ Public Class GhGumball
             'Count.
             Dim countgeo As GH_IReader = data.FindChunk("countgeo", 0)
             Count = countgeo.GetInt32("count", 0)
+            ReDim SlotAlignStates(Count - 1)
 
             'Geomtry.
             Geometry = New GeometryBase(Count - 1) {}
@@ -1404,7 +2200,7 @@ Public Class GhGumball
             'Attributes_modes
             Dim att1 As GH_IO.Serialization.GH_Chunk = att.FindChunk("gumballattributes_modes", 1)
             comp.ModeValue(0) = att1.GetInt32("valmode", 0)
-            comp.ModeValue(1) = att1.GetInt32("attmode", 1)
+            comp.ModeValue(1) = GumballComp.LoadDisplayModeFromChunk(att1)
             Dim alignF As Boolean = att1.GetBoolean("aligntogeometry", 2)
             Dim snapF As Boolean = False
             If Not att1.TryGetBoolean("snaptogeometry", 6, snapF) Then snapF = False
@@ -1415,6 +2211,10 @@ Public Class GhGumball
                 comp.ProximityCache = proxStored
             Else
                 comp.ProximityCache = False
+            End If
+            Dim saveShiftedStored As Boolean
+            If att1.TryGetBoolean("saveshifted", 9, saveShiftedStored) Then
+                comp.SaveShifted = saveShiftedStored
             End If
             Dim lvStored As Boolean
             If att1.TryGetBoolean("livetransform", 5, lvStored) Then
@@ -1503,6 +2303,10 @@ Public Class GhGumball
     '
     '
     Public Sub ShowGumballs()
+        If Component IsNot Nothing Then
+            Component.SyncGumballVisibility()
+            Return
+        End If
         If Conduits Is Nothing Then Return
         For i As Int32 = 0 To Conduits.Length - 1
             Conduits(i).Enabled = True
@@ -1510,6 +2314,69 @@ Public Class GhGumball
         Me.Enabled = True
         Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
     End Sub
+
+    Friend Sub SetConduitEnabled(slot As Integer, enabled As Boolean)
+        If Conduits Is Nothing OrElse slot < 0 OrElse slot >= Count Then Return
+        Conduits(slot).Enabled = enabled
+    End Sub
+
+    Friend Shared Sub ConfigureAppearanceFromPreset(app As Rhino.UI.Gumball.GumballAppearanceSettings, preset As Integer(), geo As GeometryBase)
+        app.TranslateXEnabled = preset(0)
+        app.TranslateYEnabled = preset(0)
+        app.TranslateZEnabled = preset(0)
+        If preset(2) <> 0 Then
+            app.FreeTranslate = 2
+        Else
+            app.FreeTranslate = 0
+        End If
+        app.RotateXEnabled = preset(3)
+        app.RotateYEnabled = preset(3)
+        app.RotateZEnabled = preset(3)
+        app.ScaleXEnabled = preset(4)
+        app.ScaleYEnabled = preset(4)
+        app.ScaleZEnabled = preset(4)
+        app.Radius = preset(5)
+        app.ArrowHeadLength = preset(6) * 2
+        app.ArrowHeadWidth = preset(6)
+        app.AxisThickness = preset(7)
+        app.ArcThickness = preset(7)
+        If preset(1) <> 0 Then
+            app.TranslateXYEnabled = True
+            app.TranslateYZEnabled = True
+            app.TranslateZXEnabled = True
+            app.PlanarTranslationGripSize = preset(8)
+            app.PlanarTranslationGripCorner = preset(9)
+        Else
+            app.TranslateXYEnabled = False
+            app.TranslateYZEnabled = False
+            app.TranslateZXEnabled = False
+            app.PlanarTranslationGripSize = 0
+            app.PlanarTranslationGripCorner = 0
+        End If
+        If geo IsNot Nothing AndAlso geo.ObjectType = Rhino.DocObjects.ObjectType.Point Then
+            app.ScaleXEnabled = False
+            app.ScaleYEnabled = False
+            app.ScaleZEnabled = False
+        End If
+    End Sub
+
+    Public Sub ApplyAppearancePresetToSlot(slot As Integer, mode As Integer)
+        If slot < 0 OrElse slot >= Count OrElse Appearances Is Nothing Then Return
+        Dim preset As Integer() = GumballComp.BuildAppearancePresetForAtt(mode, CustomAppearance)
+        ConfigureAppearanceFromPreset(Appearances(slot), preset, Geometry(slot))
+        If IsLiveGripDragActive() Then Return
+        Try
+            Conduits(slot).SetBaseGumball(Gumballs(slot), Appearances(slot))
+        Catch
+        End Try
+    End Sub
+
+    Private Function SnapRadiusForGrip(ix As Integer) As Double
+        If Not Double.IsNaN(SnapTranslateRadiusOverride) AndAlso SnapTranslateRadiusOverride > 0 Then
+            Return SnapTranslateRadiusOverride
+        End If
+        Return Double.NaN
+    End Function
 
     Public Sub HideGumballs()
         If Conduits Is Nothing Then Return
@@ -1583,11 +2450,7 @@ Public Class GhGumball
         Conduits(Index).Enabled = True
 
         If Me.Component.ModeValue(2) Then
-            If HasAlignAxisReferencePlane AndAlso AlignAxisReferencePlane.IsValid Then
-                AlignToAxisReferencePlane()
-            ElseIf GeometrytoAlign IsNot Nothing Then
-                AlignToGeometry(GeometrytoAlign)
-            End If
+            ReapplySlotAlignment(Index)
         End If
 
         Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
@@ -1602,10 +2465,10 @@ Public Class GhGumball
         pln.Transform(xform)
 
         If (Rhino.ApplicationSettings.ModelAidSettings.GridSnap) Then
-            If (Conduits(Index).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateFree Or Conduits(Index).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateX Or
-                    Conduits(Index).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateY Or Conduits(Index).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateZ Or
-                    Conduits(Index).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateXY Or Conduits(Index).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateYZ Or
-                    Conduits(Index).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateZX) Then
+            If (Conduits(i).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateFree Or Conduits(i).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateX Or
+                    Conduits(i).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateY Or Conduits(i).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateZ Or
+                    Conduits(i).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateXY Or Conduits(i).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateYZ Or
+                    Conduits(i).PickResult.Mode = Rhino.UI.Gumball.GumballMode.TranslateZX) Then
 
                 pln.Origin = New Point3d(CInt(pln.Origin.X), CInt(pln.Origin.Y), CInt(pln.Origin.Z))
                 gbframe.Plane = pln
@@ -1619,11 +2482,7 @@ Public Class GhGumball
         Conduits(i).Enabled = True
 
         If Me.Component.ModeValue(2) Then
-            If HasAlignAxisReferencePlane AndAlso AlignAxisReferencePlane.IsValid Then
-                AlignToAxisReferencePlane()
-            ElseIf GeometrytoAlign IsNot Nothing Then
-                AlignToGeometry(GeometrytoAlign)
-            End If
+            ReapplySlotAlignment(i)
         End If
 
 
@@ -1661,72 +2520,169 @@ Public Class GhGumball
         Conduits(index).Enabled = True
 
         If Me.Component.ModeValue(2) Then
-            If HasAlignAxisReferencePlane AndAlso AlignAxisReferencePlane.IsValid Then
-                AlignToAxisReferencePlane()
-            ElseIf GeometrytoAlign IsNot Nothing Then
-                AlignToGeometry(GeometrytoAlign)
-            End If
+            ReapplySlotAlignment(index)
         End If
 
         Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
     End Sub
 
+    Private Sub EnsureSlotAlignArray()
+        If Count <= 0 Then Return
+        If SlotAlignStates Is Nothing OrElse SlotAlignStates.Length <> Count Then
+            ReDim SlotAlignStates(Count - 1)
+        End If
+    End Sub
+
+    Private Sub ClearSlotAlignStateOnly(i As Integer)
+        If SlotAlignStates Is Nothing OrElse i < 0 OrElse i >= SlotAlignStates.Length Then Return
+        If SlotAlignStates(i).AlignGeo IsNot Nothing Then
+            Try
+                SlotAlignStates(i).AlignGeo.Dispose()
+            Catch
+            End Try
+        End If
+        Dim empty As SlotAlignState
+        empty.Kind = SlotAlignKind.None
+        empty.AxisPlane = Plane.Unset
+        empty.AlignGeo = Nothing
+        SlotAlignStates(i) = empty
+    End Sub
+
+    Public Sub ClearAllSlotAlign()
+        If SlotAlignStates IsNot Nothing Then
+            For i As Integer = 0 To SlotAlignStates.Length - 1
+                ClearSlotAlignStateOnly(i)
+            Next
+        End If
+        GeometrytoAlign = Nothing
+        ClearAlignAxisReference()
+    End Sub
+
+    Public Sub ClearSlotAlign(i As Integer)
+        If i < 0 OrElse i >= Count Then Return
+        EnsureSlotAlignArray()
+        ClearSlotAlignStateOnly(i)
+    End Sub
+
+    Public Sub SetSlotAlignAxis(slot As Integer, refPl As Plane)
+        If slot < 0 OrElse slot >= Count OrElse Not refPl.IsValid Then Return
+        EnsureSlotAlignArray()
+        ClearSlotAlignStateOnly(slot)
+        Dim st As SlotAlignState
+        st.Kind = SlotAlignKind.Axis
+        st.AxisPlane = refPl
+        st.AlignGeo = Nothing
+        SlotAlignStates(slot) = st
+        AlignSlotToAxisReference(slot)
+    End Sub
+
+    Public Sub SetSlotAlignGeometry(slot As Integer, geo As GeometryBase)
+        If slot < 0 OrElse slot >= Count OrElse geo Is Nothing Then Return
+        EnsureSlotAlignArray()
+        ClearSlotAlignStateOnly(slot)
+        Dim st As SlotAlignState
+        st.Kind = SlotAlignKind.Geometry
+        st.AxisPlane = Plane.Unset
+        st.AlignGeo = geo
+        SlotAlignStates(slot) = st
+        AlignSlotToGeometry(slot, geo)
+    End Sub
+
+    Private Sub AlignSlotToGeometry(i As Integer, Geo As GeometryBase)
+        If i < 0 OrElse i >= Count OrElse Geo Is Nothing Then Return
+
+        Dim gbframe As Rhino.UI.Gumball.GumballFrame = Conduits(i).Gumball.Frame
+        Dim baseFrame As Rhino.UI.Gumball.GumballFrame = Gumballs(i).Frame
+
+        If (Geo.ObjectType = Rhino.DocObjects.ObjectType.Brep) Then
+            Dim brp As Brep = DirectCast(Geo, Brep)
+            Dim pln As Plane = gbframe.Plane
+            Dim cpt As New Point3d
+            Dim ci As ComponentIndex
+            Dim normal As New Vector3d
+            brp.ClosestPoint(gbframe.Plane.Origin, cpt, ci, Nothing, Nothing, 0, normal)
+            If Not (ci.ComponentIndexType = ComponentIndexType.BrepFace) Or Not (normal.IsValid) Then
+                normal = New Vector3d(pln.Origin - cpt)
+            End If
+            Dim transform As Transform = Transform.Rotation(pln.ZAxis, normal, pln.Origin)
+            pln.Transform(transform)
+            gbframe.Plane = pln
+
+        ElseIf (Geo.ObjectType = Rhino.DocObjects.ObjectType.Mesh) Then
+            Dim msh As Mesh = DirectCast(Geo, Mesh)
+            Dim mshpt As MeshPoint = msh.ClosestMeshPoint(gbframe.Plane.Origin, 0.0)
+            Dim pln As Plane = gbframe.Plane
+            Dim transform As Transform = Transform.Rotation(pln.ZAxis, msh.NormalAt(mshpt), pln.Origin)
+            pln.Transform(transform)
+            gbframe.Plane = pln
+
+        ElseIf (Geo.ObjectType = Rhino.DocObjects.ObjectType.Curve) Then
+            Dim crv As Curve = DirectCast(Geo, Curve)
+            Dim t As New Double
+            crv.ClosestPoint(gbframe.Plane.Origin, t)
+            Dim pln As New Plane(gbframe.Plane.Origin, crv.TangentAt(t), Vector3d.CrossProduct(New Vector3d(gbframe.Plane.Origin - crv.PointAt(t)), crv.TangentAt(t)))
+            gbframe.Plane = pln
+
+        ElseIf (Geo.ObjectType = Rhino.DocObjects.ObjectType.Point) Then
+            Dim pt As Rhino.Geometry.Point = DirectCast(Geo, Rhino.Geometry.Point)
+            Dim pln As Plane = gbframe.Plane
+            Dim transform As Transform = Transform.Rotation(pln.ZAxis, New Vector3d(pln.Origin - pt.Location), pln.Origin)
+            pln.Transform(transform)
+            gbframe.Plane = pln
+
+        Else
+            Return
+        End If
+
+        baseFrame.Plane = gbframe.Plane
+        baseFrame.ScaleGripDistance = gbframe.ScaleGripDistance
+        Gumballs(i).Frame = baseFrame
+        Conduits(i).SetBaseGumball(Gumballs(i), Appearances(i))
+        Conduits(i).Enabled = True
+    End Sub
+
+    Private Sub AlignSlotToAxisReference(i As Integer)
+        If i < 0 OrElse i >= Count Then Return
+        EnsureSlotAlignArray()
+        If SlotAlignStates(i).Kind <> SlotAlignKind.Axis OrElse Not SlotAlignStates(i).AxisPlane.IsValid Then Return
+        Dim refPl As Plane = SlotAlignStates(i).AxisPlane
+        Dim gbframe As Rhino.UI.Gumball.GumballFrame = Conduits(i).Gumball.Frame
+        Dim baseFrame As Rhino.UI.Gumball.GumballFrame = Gumballs(i).Frame
+        Dim o As Point3d = gbframe.Plane.Origin
+        gbframe.Plane = New Plane(o, refPl.XAxis, refPl.YAxis)
+        baseFrame.Plane = gbframe.Plane
+        baseFrame.ScaleGripDistance = gbframe.ScaleGripDistance
+        Gumballs(i).Frame = baseFrame
+        Conduits(i).SetBaseGumball(Gumballs(i), Appearances(i))
+        Conduits(i).Enabled = True
+    End Sub
+
+    Friend Sub ReapplySlotAlignment(i As Integer)
+        If Component Is Nothing OrElse Not Component.ModeValue(2) Then Return
+        If i < 0 OrElse i >= Count Then Return
+        EnsureSlotAlignArray()
+        Select Case SlotAlignStates(i).Kind
+            Case SlotAlignKind.Axis
+                AlignSlotToAxisReference(i)
+            Case SlotAlignKind.Geometry
+                If SlotAlignStates(i).AlignGeo IsNot Nothing Then
+                    AlignSlotToGeometry(i, SlotAlignStates(i).AlignGeo)
+                End If
+        End Select
+    End Sub
+
     Public Sub AlignToGeometry(Geo As GeometryBase)
 
         HasAlignAxisReferencePlane = False
+        AlignAxisReferencePlane = Plane.Unset
         GeometrytoAlign = Geo
 
         For i As Int32 = 0 To Count - 1
-
-            Dim gbframe As Rhino.UI.Gumball.GumballFrame = Conduits(i).Gumball.Frame
-            Dim baseFrame As Rhino.UI.Gumball.GumballFrame = Gumballs(i).Frame
-
-            If (Geo.ObjectType = Rhino.DocObjects.ObjectType.Brep) Then
-                Dim brp As Brep = DirectCast(Geo, Brep)
-                Dim pln As Plane = gbframe.Plane
-                Dim cpt As New Point3d
-                Dim ci As ComponentIndex
-                Dim normal As New Vector3d
-                brp.ClosestPoint(gbframe.Plane.Origin, cpt, ci, Nothing, Nothing, 0, normal)
-                If Not (ci.ComponentIndexType = ComponentIndexType.BrepFace) Or Not (normal.IsValid) Then
-                    normal = New Vector3d(pln.Origin - cpt)
-                End If
-                Dim transform As Transform = Transform.Rotation(pln.ZAxis, normal, pln.Origin)
-                pln.Transform(transform)
-                gbframe.Plane = pln
-
-            ElseIf (Geo.ObjectType = Rhino.DocObjects.ObjectType.Mesh) Then
-                Dim msh As Mesh = DirectCast(Geo, Mesh)
-                Dim mshpt As MeshPoint = msh.ClosestMeshPoint(gbframe.Plane.Origin, 0.0)
-                Dim pln As Plane = gbframe.Plane
-                Dim transform As Transform = Transform.Rotation(pln.ZAxis, msh.NormalAt(mshpt), pln.Origin)
-                pln.Transform(transform)
-                gbframe.Plane = pln
-
-            ElseIf (Geo.ObjectType = Rhino.DocObjects.ObjectType.Curve) Then
-                Dim crv As Curve = DirectCast(Geo, Curve)
-                Dim t As New Double
-                crv.ClosestPoint(gbframe.Plane.Origin, t)
-                Dim pln As New Plane(gbframe.Plane.Origin, crv.TangentAt(t), Vector3d.CrossProduct(New Vector3d(gbframe.Plane.Origin - crv.PointAt(t)), crv.TangentAt(t)))
-                gbframe.Plane = pln
-
-            ElseIf (Geo.ObjectType = Rhino.DocObjects.ObjectType.Point) Then
-                Dim pt As Rhino.Geometry.Point = DirectCast(Geo, Rhino.Geometry.Point)
-                Dim pln As Plane = gbframe.Plane
-                Dim transform As Transform = Transform.Rotation(pln.ZAxis, New Vector3d(pln.Origin - pt.Location), pln.Origin)
-                pln.Transform(transform)
-                gbframe.Plane = pln
-
+            If Geo Is Nothing Then
+                ClearSlotAlign(i)
             Else
-                Continue For
+                SetSlotAlignGeometry(i, Geo.Duplicate())
             End If
-
-            baseFrame.Plane = gbframe.Plane
-            baseFrame.ScaleGripDistance = gbframe.ScaleGripDistance
-            Gumballs(i).Frame = baseFrame
-            Conduits(i).SetBaseGumball(Gumballs(i), Appearances(i))
-            Conduits(i).Enabled = True
-
         Next
         Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
     End Sub
@@ -1741,40 +2697,33 @@ Public Class GhGumball
         HasAlignAxisReferencePlane = True
         AlignAxisReferencePlane = refPl
         GeometrytoAlign = Nothing
-        AlignToAxisReferencePlane()
+        For i As Int32 = 0 To Count - 1
+            SetSlotAlignAxis(i, refPl)
+        Next
     End Sub
 
     ''' <summary>Align all gumball axes to <see cref="AlignAxisReferencePlane"/>; each gumball keeps its current origin (centre).</summary>
     Public Sub AlignToAxisReferencePlane()
         If Not HasAlignAxisReferencePlane OrElse Not AlignAxisReferencePlane.IsValid Then Return
         For i As Int32 = 0 To Count - 1
-            Dim gbframe As Rhino.UI.Gumball.GumballFrame = Conduits(i).Gumball.Frame
-            Dim baseFrame As Rhino.UI.Gumball.GumballFrame = Gumballs(i).Frame
-            Dim o As Point3d = gbframe.Plane.Origin
-            gbframe.Plane = New Plane(o, AlignAxisReferencePlane.XAxis, AlignAxisReferencePlane.YAxis)
-            baseFrame.Plane = gbframe.Plane
-            baseFrame.ScaleGripDistance = gbframe.ScaleGripDistance
-            Gumballs(i).Frame = baseFrame
-            Conduits(i).SetBaseGumball(Gumballs(i), Appearances(i))
-            Conduits(i).Enabled = True
+            AlignSlotToAxisReference(i)
         Next
         Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
     End Sub
 
     Friend Sub ReapplyStoredAlignment()
         If Component Is Nothing OrElse Not Component.ModeValue(2) Then Return
-        If HasAlignAxisReferencePlane AndAlso AlignAxisReferencePlane.IsValid Then
-            AlignToAxisReferencePlane()
-        ElseIf GeometrytoAlign IsNot Nothing Then
-            AlignToGeometry(GeometrytoAlign)
-        End If
+        For i As Integer = 0 To Count - 1
+            ReapplySlotAlignment(i)
+        Next
+        Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
     End Sub
 
     ''' <summary>Commits the current conduit delta to Grasshopper geometry and gumball bases (picked slot <paramref name="gripIndex"/>).</summary>
     Private Sub CommitGripTransform(ByVal gripIndex As Integer, gbxform As Transform)
         If gripIndex < 0 OrElse gripIndex >= Count OrElse gbxform = Transform.Identity Then Return
 
-        Select Case Component.ModeValue(0)
+        Select Case Component.EffectiveTransformMode(gripIndex)
 
             Case 0 'Normal.
                 Dim ghXform As New Grasshopper.Kernel.Types.GH_Transform(New Grasshopper.Kernel.Types.Transforms.Generic(gbxform))
@@ -1878,9 +2827,9 @@ Public Class GhGumball
         If Not c.UpdateGumball(dragPoint, wordline) Then Return False
 
         ' Geometry snapping: after the raw (constrained) update, stick the gumball origin to the target under the cursor.
-        If SnapTranslateActive(c.PickResult.Mode) Then
+        If SnapTranslateActive(c.PickResult.Mode, ix) Then
             Dim snapDelta As Vector3d
-            If TryComputeSnapTranslateDelta(c, view, viewportPt, snapDelta) Then
+            If TryComputeSnapTranslateDelta(c, view, viewportPt, ix, snapDelta) Then
                 dragPoint += snapDelta
                 If wordline.IsValid Then wordline.Transform(Transform.Translation(snapDelta))
                 c.UpdateGumball(dragPoint, wordline)
@@ -1892,10 +2841,11 @@ Public Class GhGumball
     ''' <summary>Screen-space snap radius (pixels) used when no t input override is supplied.</summary>
     Private Const SnapTranslateScreenRadiusPx As Double = 15.0R
 
-    Private Function SnapTranslateActive(mode As Rhino.UI.Gumball.GumballMode) As Boolean
+    Private Function SnapTranslateActive(mode As Rhino.UI.Gumball.GumballMode, gripIx As Integer) As Boolean
         If Not IsTranslateGumballMode(mode) Then Return False
-        If SnapTranslateTargets Is Nothing OrElse SnapTranslateTargets.Count = 0 Then Return False
-        Return Component IsNot Nothing AndAlso CBool(Component.ModeValue(3))
+        If Component Is Nothing OrElse Not CBool(Component.ModeValue(3)) Then Return False
+        Dim targets As List(Of GeometryBase) = SnapTargetsForSlot(gripIx)
+        Return targets IsNot Nothing AndAlso targets.Count > 0
     End Function
 
     ''' <summary>One snap candidate: a target point plus its osnap class (0 = vertex, 1 = curve/edge, 2 = surface/face).</summary>
@@ -2127,7 +3077,7 @@ Public Class GhGumball
     ''' accepted when they lie within the pixel radius of the cursor (or the model-space t override,
     ''' measured ray-to-target). The winning point is applied through the active translate constraint.
     ''' </summary>
-    Private Function TryComputeSnapTranslateDelta(c As Rhino.UI.Gumball.GumballDisplayConduit, view As Rhino.Display.RhinoView, viewportPt As Drawing.Point, ByRef delta As Vector3d) As Boolean
+    Private Function TryComputeSnapTranslateDelta(c As Rhino.UI.Gumball.GumballDisplayConduit, view As Rhino.Display.RhinoView, viewportPt As Drawing.Point, gripIx As Integer, ByRef delta As Vector3d) As Boolean
         delta = Vector3d.Zero
         If view Is Nothing Then Return False
 
@@ -2145,10 +3095,7 @@ Public Class GhGumball
         If Not view.MainViewport.GetFrustumLine(CDbl(viewportPt.X), CDbl(viewportPt.Y), ray) Then Return False
         If Not ray.IsValid Then Return False
 
-        Dim overrideRadius As Double = Double.NaN
-        If Not Double.IsNaN(SnapTranslateRadiusOverride) AndAlso SnapTranslateRadiusOverride > 0 Then
-            overrideRadius = SnapTranslateRadiusOverride
-        End If
+        Dim overrideRadius As Double = SnapRadiusForGrip(gripIx)
 
         Dim cursor As New Rhino.Geometry.Point2d(CDbl(viewportPt.X), CDbl(viewportPt.Y))
         Dim cameraLocation As Point3d = ray.To
@@ -2158,9 +3105,12 @@ Public Class GhGumball
         Catch
         End Try
 
-        ' All candidates from all targets: vertices, edges/curves, faces/surfaces.
+        ' Candidates from this gumball slot's snap targets only.
+        Dim slotTargets As List(Of GeometryBase) = SnapTargetsForSlot(gripIx)
+        If slotTargets Is Nothing OrElse slotTargets.Count = 0 Then Return False
+
         Dim cands As New List(Of SnapCandidate)
-        For Each geom As GeometryBase In SnapTranslateTargets
+        For Each geom As GeometryBase In slotTargets
             CollectSnapCandidates(geom, ray, cands)
         Next
         If cands.Count = 0 Then Return False
@@ -2375,6 +3325,9 @@ Public Class GhGumball
         Pick.UpdateClippingPlanes()
 
         For i As Int32 = 0 To Count - 1
+            If Component IsNot Nothing AndAlso Component.SlotSettings IsNot Nothing AndAlso i < Component.SlotSettings.Length Then
+                If Not Component.SlotSettings(i).Active Then Continue For
+            End If
             If (Conduits(i).PickGumball(Pick, Nothing)) Then
                 Index = i
                 SaveUndo = True
@@ -2615,7 +3568,7 @@ Public Class GhGumball
 
                 Case Rhino.UI.Gumball.GumballMode.ScaleX
                     gbxform = Transform.Scale(pln, value, 1, 1)
-                    If (Component.ModeValue(0) = 1) Then 'Apply to all.
+                    If Component.SlotAppliesToAll(Index) Then 'Apply to all.
                         For i As Int32 = 0 To Count - 1
                             Dim frame As Rhino.UI.Gumball.GumballFrame = Conduits(i).Gumball.Frame
                             frame.ScaleGripDistance = New Vector3d(frame.ScaleGripDistance.X * value, frame.ScaleGripDistance.Y, frame.ScaleGripDistance.Z)
@@ -2631,7 +3584,7 @@ Public Class GhGumball
 
                 Case Rhino.UI.Gumball.GumballMode.ScaleY
                     gbxform = Transform.Scale(pln, 1, value, 1)
-                    If (Component.ModeValue(0) = 1) Then 'Apply to all.
+                    If Component.SlotAppliesToAll(Index) Then 'Apply to all.
                         For i As Int32 = 0 To Count - 1
                             Dim frame As Rhino.UI.Gumball.GumballFrame = Conduits(i).Gumball.Frame
                             frame.ScaleGripDistance = New Vector3d(frame.ScaleGripDistance.X, frame.ScaleGripDistance.Y * value, frame.ScaleGripDistance.Z)
@@ -2647,7 +3600,7 @@ Public Class GhGumball
 
                 Case Rhino.UI.Gumball.GumballMode.ScaleZ
                     gbxform = Transform.Scale(pln, 1, 1, value)
-                    If (Component.ModeValue(0) = 1) Then 'Apply to all.
+                    If Component.SlotAppliesToAll(Index) Then 'Apply to all.
                         For i As Int32 = 0 To Count - 1
                             Dim frame As Rhino.UI.Gumball.GumballFrame = Conduits(i).Gumball.Frame
                             frame.ScaleGripDistance = New Vector3d(frame.ScaleGripDistance.X, frame.ScaleGripDistance.Y, frame.ScaleGripDistance.Z * value)
@@ -2671,7 +3624,7 @@ Public Class GhGumball
 
             If (gbxform <> Transform.Identity) Then
 
-                Select Case Component.ModeValue(0)
+                Select Case Component.EffectiveTransformMode(Index)
 
                     Case 0 'Normal
                         Dim ghXform As New Grasshopper.Kernel.Types.GH_Transform(New Grasshopper.Kernel.Types.Transforms.Generic(gbxform))
@@ -2775,6 +3728,8 @@ Public Class GhGumball
             Return MyCustomAppearance
         End Get
         Set(value As Integer())
+            If value Is Nothing Then Return
+            If GumballComp.AppearancePresetsEqual(value, MyCustomAppearance) Then Return
             MyCustomAppearance = value
 
             For i As Int32 = 0 To Count - 1
@@ -2840,7 +3795,13 @@ Public Class GhGumball
         End Set
     End Property
 
+    Friend Function IsLiveGripDragActive() As Boolean
+        Return Component IsNot Nothing AndAlso Component.LiveTransformsWhileDragging AndAlso
+            PreviewGripSlot >= 0 AndAlso Not (PreviewGripDelta = Transform.Identity)
+    End Function
+
     Private Sub ChangeAppearances()
+        If IsLiveGripDragActive() Then Return
 
         For i As Int32 = 0 To Count - 1
             Conduits(i).Enabled = False
@@ -2967,11 +3928,16 @@ Public Class GhGumball
             Dim att1 As GH_IWriter = att.CreateChunk("gumballattributes_modes", 1)
             att1.SetInt32("valmode", 0, Me.Component.ModeValue(0))
             att1.SetInt32("attmode", 1, Me.Component.ModeValue(1))
+            att1.SetInt32("displaymode", 7, Me.Component.ModeValue(1))
             att1.SetBoolean("aligntogeometry", 2, Me.Component.ModeValue(2))
             att1.SetBoolean("preservexf", 3, Me.Component.PreserveTransformsOnGeometryChange)
             att1.SetBoolean("proximitycache", 4, Me.Component.ProximityCache)
+            att1.SetBoolean("saveshifted", 9, Me.Component.SaveShifted)
             att1.SetBoolean("livetransform", 5, Me.Component.LiveTransformsWhileDragging)
             att1.SetBoolean("snaptogeometry", 6, CBool(Me.Component.ModeValue(3)))
+            If Not Double.IsNaN(Me.Component.SnapTranslateTolerance) AndAlso Me.Component.SnapTranslateTolerance > 0 Then
+                att1.SetDouble("snaptol", 8, Me.Component.SnapTranslateTolerance)
+            End If
 
         Catch ex As Exception
             Rhino.RhinoApp.WriteLine("WRITER_GB; " & ex.ToString())
@@ -2998,6 +3964,7 @@ Public Class GhGumball
             'Count.
             Dim countgeo As GH_IReader = data.FindChunk("countgeo", 0)
             Count = countgeo.GetInt32("count", 0)
+            ReDim SlotAlignStates(Count - 1)
 
             'Geomtry.
             Geometry = New GeometryBase(Count - 1) {}
@@ -3051,17 +4018,25 @@ Public Class GhGumball
             'Attributes_modes
             Dim att1 As GH_IO.Serialization.GH_Chunk = att.FindChunk("gumballattributes_modes", 1)
             Component.ModeValue(0) = att1.GetInt32("valmode", 0)
-            Component.ModeValue(1) = att1.GetInt32("attmode", 1)
+            Component.ModeValue(1) = GumballComp.LoadDisplayModeFromChunk(att1)
             Dim alignF2 As Boolean = att1.GetBoolean("aligntogeometry", 2)
             Dim snapF2 As Boolean = False
             If Not att1.TryGetBoolean("snaptogeometry", 6, snapF2) Then snapF2 = False
             Component.ApplyOptionalInputModesFromFile(alignF2, snapF2)
+            Dim snapTolStored As Double
+            If att1.TryGetDouble("snaptol", 8, snapTolStored) AndAlso snapTolStored > 0 Then
+                Component.SnapTranslateTolerance = snapTolStored
+            End If
             Component.PreserveTransformsOnGeometryChange = att1.GetBoolean("preservexf", 3)
             Dim proxStored2 As Boolean
             If att1.TryGetBoolean("proximitycache", 4, proxStored2) Then
                 Component.ProximityCache = proxStored2
             Else
                 Component.ProximityCache = False
+            End If
+            Dim saveShiftedStored As Boolean
+            If att1.TryGetBoolean("saveshifted", 9, saveShiftedStored) Then
+                Component.SaveShifted = saveShiftedStored
             End If
             Dim lvStored2 As Boolean
             If att1.TryGetBoolean("livetransform", 5, lvStored2) Then
@@ -3134,7 +4109,7 @@ Public Class GhGumball
                 Conduits(i).SetBaseGumball(Gumballs(i), app)
 
                 Me.Component.ExpireSolution(True)
-                If (Me.Component.Attributes.Selected) Then Me.ShowGumballs()
+                If (Me.Component.WantsSlotVisible(i)) Then Me.Component.SyncGumballVisibility()
 
             Next
         Catch ex As Exception
@@ -3186,10 +4161,17 @@ Public Class FormAttributes
     Inherits System.Windows.Forms.Form
 
     ''' <summary>Backdrop click (Rhino viewport) dismissal, same routing as numeric gumball entry.</summary>
-    Friend Shared Sub RequestDismissFromBackdropMouse()
+    Friend Shared Function ConsumeBackdropMouseDown() As Boolean
         Dim f As FormAttributes = _activeInstance
-        If f Is Nothing OrElse f.IsDisposed Then Return
+        If f Is Nothing OrElse f.IsDisposed OrElse Not f.Visible Then Return False
+        If f._committing OrElse Not f._outsideDismissReady Then Return False
+        If Environment.TickCount < f._suppressBackdropDismissUntil Then Return False
         f.TryDismissFromOutsideRhinoGesture()
+        Return True
+    End Function
+
+    Friend Shared Sub RequestDismissFromBackdropMouse()
+        ConsumeBackdropMouseDown()
     End Sub
 
     Private Shared _activeInstance As FormAttributes
@@ -3338,6 +4320,14 @@ Public Class FormAttributes
             SafeNumericValue(Me.NumPS, ca.CustomAppearance(8))
             SafeNumericValue(Me.NumPD, ca.CustomAppearance(9))
         End If
+        Dim st As Double = Component.SnapTranslateTolerance
+        If Double.IsNaN(st) OrElse st <= 0 Then
+            NumSnapTol.Value = 0D
+        Else
+            Dim d As Decimal = CDec(st)
+            If d > NumSnapTol.Maximum Then d = NumSnapTol.Maximum
+            NumSnapTol.Value = d
+        End If
         CanSend = True
     End Sub
 
@@ -3414,6 +4404,23 @@ Public Class FormAttributes
     Private Sub NumPD_ValueChanged(sender As Object, e As EventArgs) Handles NumPD.ValueChanged
         If (Me.Component.MyGumball IsNot Nothing) AndAlso (CanSend) Then Component.MyGumball.CustomAppearance(9) = CInt(Me.NumPD.Value)
     End Sub
+
+    Private Sub NumSnapTol_ValueChanged(sender As Object, e As EventArgs) Handles NumSnapTol.ValueChanged
+        If Not CanSend Then Return
+        If NumSnapTol.Value <= 0D Then
+            Component.SnapTranslateTolerance = Double.NaN
+        Else
+            Component.SnapTranslateTolerance = CDbl(NumSnapTol.Value)
+        End If
+        If Component.MyGumball IsNot Nothing Then
+            If Double.IsNaN(Component.SnapTranslateTolerance) OrElse Component.SnapTranslateTolerance <= 0 Then
+                Component.MyGumball.SnapTranslateRadiusOverride = Double.NaN
+            Else
+                Component.MyGumball.SnapTranslateRadiusOverride = Component.SnapTranslateTolerance
+            End If
+        End If
+        Component.ExpireSolution(True)
+    End Sub
 #End Region
 
 #Region "Design"
@@ -3448,11 +4455,14 @@ Public Class FormAttributes
         Me.LabelPD = New System.Windows.Forms.Label()
         Me.NumPD = New System.Windows.Forms.NumericUpDown()
         Me.ButtFree = New System.Windows.Forms.CheckBox()
+        Me.NumSnapTol = New System.Windows.Forms.NumericUpDown()
+        Me.LabelSnapTol = New System.Windows.Forms.Label()
         CType(Me.NumRad, System.ComponentModel.ISupportInitialize).BeginInit()
         CType(Me.NumAH, System.ComponentModel.ISupportInitialize).BeginInit()
         CType(Me.NumThk, System.ComponentModel.ISupportInitialize).BeginInit()
         CType(Me.NumPS, System.ComponentModel.ISupportInitialize).BeginInit()
         CType(Me.NumPD, System.ComponentModel.ISupportInitialize).BeginInit()
+        CType(Me.NumSnapTol, System.ComponentModel.ISupportInitialize).BeginInit()
         Me.SuspendLayout()
         '
         'ButtTranslate
@@ -3566,6 +4576,25 @@ Public Class FormAttributes
         Me.NumPD.TabIndex = 10
         Me.NumPD.Value = New Decimal(New Integer() {35, 0, 0, 0})
         '
+        'NumSnapTol
+        '
+        Me.NumSnapTol.DecimalPlaces = 3
+        Me.NumSnapTol.Increment = New Decimal(New Integer() {1, 0, 0, 65536})
+        Me.NumSnapTol.Location = New System.Drawing.Point(90, 262)
+        Me.NumSnapTol.Maximum = New Decimal(New Integer() {100000, 0, 0, 0})
+        Me.NumSnapTol.Name = "NumSnapTol"
+        Me.NumSnapTol.Size = New System.Drawing.Size(48, 20)
+        Me.NumSnapTol.TabIndex = 11
+        '
+        'LabelSnapTol
+        '
+        Me.LabelSnapTol.AutoSize = True
+        Me.LabelSnapTol.Location = New System.Drawing.Point(12, 264)
+        Me.LabelSnapTol.Name = "LabelSnapTol"
+        Me.LabelSnapTol.Size = New System.Drawing.Size(72, 13)
+        Me.LabelSnapTol.TabIndex = 16
+        Me.LabelSnapTol.Text = "Snap tol (0=auto)"
+        '
         'LabelRad
         '
         Me.LabelRad.AutoSize = True
@@ -3615,7 +4644,9 @@ Public Class FormAttributes
         '
         Me.AutoScaleDimensions = New System.Drawing.SizeF(6.0!, 13.0!)
         Me.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font
-        Me.ClientSize = New System.Drawing.Size(153, 273)
+        Me.ClientSize = New System.Drawing.Size(153, 299)
+        Me.Controls.Add(Me.LabelSnapTol)
+        Me.Controls.Add(Me.NumSnapTol)
         Me.Controls.Add(Me.ButtFree)
         Me.Controls.Add(Me.LabelPD)
         Me.Controls.Add(Me.NumPD)
@@ -3646,6 +4677,7 @@ Public Class FormAttributes
         CType(Me.NumThk, System.ComponentModel.ISupportInitialize).EndInit()
         CType(Me.NumPS, System.ComponentModel.ISupportInitialize).EndInit()
         CType(Me.NumPD, System.ComponentModel.ISupportInitialize).EndInit()
+        CType(Me.NumSnapTol, System.ComponentModel.ISupportInitialize).EndInit()
         Me.ResumeLayout(False)
         Me.PerformLayout()
 
@@ -3666,6 +4698,8 @@ Public Class FormAttributes
     Friend WithEvents LabelPD As Label
     Friend WithEvents NumPD As NumericUpDown
     Friend WithEvents ButtFree As CheckBox
+    Friend WithEvents NumSnapTol As NumericUpDown
+    Friend WithEvents LabelSnapTol As Label
 #End Region
 
 End Class
@@ -3676,10 +4710,17 @@ Public Class FormTextBox
     Private Shared _activeInstance As FormTextBox
 
     ''' <summary>Second Rhino MouseCallback route: fires for viewport presses even while the numeric WinForms window has focus.</summary>
-    Friend Shared Sub RequestDismissFromBackdropMouse()
+    Friend Shared Function ConsumeBackdropMouseDown() As Boolean
         Dim f As FormTextBox = _activeInstance
-        If f Is Nothing OrElse f.IsDisposed Then Return
+        If f Is Nothing OrElse f.IsDisposed OrElse Not f.Visible Then Return False
+        If f._committing OrElse Not f._outsideDismissReady Then Return False
+        If Environment.TickCount < f._suppressBackdropDismissUntil Then Return False
         f.TryDismissFromOutsideRhinoGesture()
+        Return True
+    End Function
+
+    Friend Shared Sub RequestDismissFromBackdropMouse()
+        ConsumeBackdropMouseDown()
     End Sub
 
     Public GB As GhGumball

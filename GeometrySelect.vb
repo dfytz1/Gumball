@@ -3,6 +3,7 @@ Imports System.Drawing
 Imports System.Drawing.Drawing2D
 Imports System.Drawing.Imaging
 Imports System.IO
+Imports System.Linq
 Imports System.Reflection
 Imports System.Windows.Forms
 Imports Grasshopper
@@ -316,6 +317,43 @@ Public Class GeometrySelectComp
     Inherits GH_Component
     Implements IGH_VariableParameterComponent
 
+    Private Enum ZuiOptionalKind
+        None = -1
+        Active = 0
+        PreselectedIndices = 1
+        OutputNulls = 2
+        LockUnselected = 3
+        PreserveChanges = 4
+        ProximityCache = 5
+        SaveShifted = 6
+        ClearCache = 7
+    End Enum
+
+    Private Enum ZuiOptionalOutputKind
+        None = -1
+        UnselectedIndex = 0
+        UnselectedGeometry = 1
+    End Enum
+
+    Private Shared ReadOnly ZuiCanonicalOrder As ZuiOptionalKind() = {
+        ZuiOptionalKind.Active,
+        ZuiOptionalKind.PreselectedIndices,
+        ZuiOptionalKind.OutputNulls,
+        ZuiOptionalKind.LockUnselected,
+        ZuiOptionalKind.PreserveChanges,
+        ZuiOptionalKind.ProximityCache,
+        ZuiOptionalKind.SaveShifted,
+        ZuiOptionalKind.ClearCache
+    }
+
+    Private Shared ReadOnly ZuiOutputOrder As ZuiOptionalOutputKind() = {
+        ZuiOptionalOutputKind.UnselectedIndex,
+        ZuiOptionalOutputKind.UnselectedGeometry
+    }
+
+    Private Const BaseInputCount As Integer = 1
+    Private Const BaseOutputCount As Integer = 2
+
     Public Sub New()
         MyBase.New("Selector", "Selector",
                    "Click geometry or block instances in the viewport (component selected on canvas) to toggle selection. Outputs flat indices and geometry.",
@@ -375,7 +413,7 @@ Public Class GeometrySelectComp
 
     Public Overrides Sub AddedToDocument(document As GH_Document)
         MyBase.AddedToDocument(document)
-        VariableParameterMaintenance()
+        SyncOptionalInputsFromFlags()
     End Sub
 
     Public Overrides Sub CreateAttributes()
@@ -433,19 +471,19 @@ Public Class GeometrySelectComp
         Dim split As ToolStripMenuItem = Menu_AppendItem(menu, "Two lists (selected / unselected)", AddressOf Menu_OutputSplit, True, Me.OutputSplitLists)
         split.ToolTipText = "When on, adds extra outputs for unselected indices and geometry. Selected outputs are unchanged."
 
-        Dim nulls As ToolStripMenuItem = Menu_AppendItem(menu, "Output nulls", AddressOf Menu_OutputNulls, True, Me.OutputNulls)
+        Dim nulls As ToolStripMenuItem = Menu_AppendItem(menu, "Output nulls", AddressOf Menu_OutputNulls, True, HasZuiInput(ZuiOptionalKind.OutputNulls) OrElse MenuBoolChecked(OutputNulls, ZuiOptionalKind.OutputNulls))
         nulls.ToolTipText = "Mirror the input tree on all active outputs: null where an item is not in that list (unselected on I/G, selected on Iu/Gu)."
 
         Menu_AppendSeparator(menu)
 
-        Dim preserve As ToolStripMenuItem = Menu_AppendItem(menu, "Preserve changes", AddressOf Menu_PreserveChanges, True, Me.PreserveChanges)
+        Dim preserve As ToolStripMenuItem = Menu_AppendItem(menu, "Preserve changes", AddressOf Menu_PreserveChanges, True, MenuBoolChecked(PreserveChanges, ZuiOptionalKind.PreserveChanges))
         preserve.ToolTipText = "Keep selection flags per item index when upstream geometry changes."
 
-        Dim proximity As ToolStripMenuItem = Menu_AppendItem(menu, "Proximity cache", AddressOf Menu_ProximityCache, True, Me.ProximityCache)
+        Dim proximity As ToolStripMenuItem = Menu_AppendItem(menu, "Proximity cache", AddressOf Menu_ProximityCache, True, MenuBoolChecked(ProximityCache, ZuiOptionalKind.ProximityCache))
         proximity.ToolTipText = "When the list changes, re-attach each selection to the nearest cached geometry instead of the list index."
 
-        Dim saveShifted As ToolStripMenuItem = Menu_AppendItem(menu, "Save shifted", AddressOf Menu_SaveShifted, True, Me.SaveShifted)
-        saveShifted.Enabled = Me.ProximityCache
+        Dim saveShifted As ToolStripMenuItem = Menu_AppendItem(menu, "Save shifted", AddressOf Menu_SaveShifted, True, HasZuiInput(ZuiOptionalKind.SaveShifted) OrElse Me.SaveShifted)
+        saveShifted.Enabled = MenuBoolChecked(ProximityCache, ZuiOptionalKind.ProximityCache)
         saveShifted.ToolTipText = "When proximity cache is on, remember selections for geometry that leaves the list and restore them if it returns."
 
         Dim cc As ToolStripMenuItem = Menu_AppendItem(menu, "Clear cache", AddressOf Menu_ClearCache, True)
@@ -453,48 +491,346 @@ Public Class GeometrySelectComp
 
         Menu_AppendSeparator(menu)
 
-        Dim lockUnsel As ToolStripMenuItem = Menu_AppendItem(menu, "Lock unselected", AddressOf Menu_LockUnselected, True, Me.LockUnselected)
+        Dim lockUnsel As ToolStripMenuItem = Menu_AppendItem(menu, "Lock unselected", AddressOf Menu_LockUnselected, True, MenuBoolChecked(LockUnselected, ZuiOptionalKind.LockUnselected))
         lockUnsel.ToolTipText = "When on, viewport picking works only while this component is selected on the Grasshopper canvas."
     End Sub
 
     Private Sub Menu_PreselectedIndices()
         RecordUndoEvent("Selector Preselected Indices", New GeometrySelectUndo(Me))
-        PreselectedIndices = Not PreselectedIndices
-        SyncOutputParameters()
+        SetZuiKindEnabled(ZuiOptionalKind.PreselectedIndices, Not (HasZuiInput(ZuiOptionalKind.PreselectedIndices) OrElse PreselectedIndices))
         Me.ExpireSolution(True)
     End Sub
 
     Private Sub Menu_OutputSplit()
         RecordUndoEvent("Selector Output Mode", New GeometrySelectUndo(Me))
-        OutputSplitLists = Not OutputSplitLists
-        SyncOutputParameters()
+        SetZuiOutputKindEnabled(ZuiOptionalOutputKind.UnselectedIndex, Not OutputSplitLists)
         Me.ExpireSolution(True)
     End Sub
 
     Private Sub Menu_OutputNulls()
         RecordUndoEvent("Selector Output Nulls", New GeometrySelectUndo(Me))
-        OutputNulls = Not OutputNulls
+        SetZuiKindEnabled(ZuiOptionalKind.OutputNulls, Not (HasZuiInput(ZuiOptionalKind.OutputNulls) OrElse OutputNulls))
         Me.ExpireSolution(True)
     End Sub
 
     Private Sub Menu_PreserveChanges()
         RecordUndoEvent("Selector Preserve", New GeometrySelectUndo(Me))
         PreserveChanges = Not PreserveChanges
+        Me.ExpireSolution(True)
     End Sub
 
     Private Sub Menu_ProximityCache()
         RecordUndoEvent("Selector Proximity", New GeometrySelectUndo(Me))
         ProximityCache = Not ProximityCache
+        Me.ExpireSolution(True)
     End Sub
 
     Private Sub Menu_SaveShifted()
-        If Not ProximityCache Then Return
+        If Not MenuBoolChecked(ProximityCache, ZuiOptionalKind.ProximityCache) Then Return
         RecordUndoEvent("Selector Save Shifted", New GeometrySelectUndo(Me))
-        SaveShifted = Not SaveShifted
+        SetZuiKindEnabled(ZuiOptionalKind.SaveShifted, Not (HasZuiInput(ZuiOptionalKind.SaveShifted) OrElse SaveShifted))
     End Sub
 
     Public Sub Menu_ClearCache()
         RecordUndoEvent("Selector Clear Cache", New GeometrySelectUndo(Me))
+        ClearSelectionCacheInternal()
+    End Sub
+
+    Private Sub Menu_LockUnselected()
+        RecordUndoEvent("Selector Lock Unselected", New GeometrySelectUndo(Me))
+        LockUnselected = Not LockUnselected
+        SyncMouse()
+    End Sub
+
+#End Region
+
+#Region "Optional inputs / ZUI"
+
+    Private Function FindInputIndexByNick(nick As String) As Integer
+        If Params Is Nothing Then Return -1
+        For i As Integer = 0 To Params.Input.Count - 1
+            If String.Equals(Params.Input(i).NickName, nick, StringComparison.OrdinalIgnoreCase) Then Return i
+        Next
+        Return -1
+    End Function
+
+    Private Function FindOutputIndexByNick(nick As String) As Integer
+        If Params Is Nothing Then Return -1
+        For i As Integer = 0 To Params.Output.Count - 1
+            If String.Equals(Params.Output(i).NickName, nick, StringComparison.OrdinalIgnoreCase) Then Return i
+        Next
+        Return -1
+    End Function
+
+    Private Function FindActiveInputIndex() As Integer
+        Return FindInputIndexByNick("Ac")
+    End Function
+
+    Private Shared Function NickNameForZuiKind(kind As ZuiOptionalKind) As String
+        Select Case kind
+            Case ZuiOptionalKind.Active : Return "Ac"
+            Case ZuiOptionalKind.PreselectedIndices : Return "Ix"
+            Case ZuiOptionalKind.OutputNulls : Return "On"
+            Case ZuiOptionalKind.LockUnselected : Return "Lu"
+            Case ZuiOptionalKind.PreserveChanges : Return "Pr"
+            Case ZuiOptionalKind.ProximityCache : Return "Px"
+            Case ZuiOptionalKind.SaveShifted : Return "Ss"
+            Case ZuiOptionalKind.ClearCache : Return "Cc"
+            Case Else : Return String.Empty
+        End Select
+    End Function
+
+    Private Shared Function NickNameForZuiOutput(kind As ZuiOptionalOutputKind) As String
+        Select Case kind
+            Case ZuiOptionalOutputKind.UnselectedIndex : Return "Iu"
+            Case ZuiOptionalOutputKind.UnselectedGeometry : Return "Gu"
+            Case Else : Return String.Empty
+        End Select
+    End Function
+
+    Private Function HasZuiInput(kind As ZuiOptionalKind) As Boolean
+        If kind = ZuiOptionalKind.None Then Return False
+        Return FindInputIndexByNick(NickNameForZuiKind(kind)) >= 0
+    End Function
+
+    Private Function HasZuiOutput(kind As ZuiOptionalOutputKind) As Boolean
+        If kind = ZuiOptionalOutputKind.None Then Return False
+        Return FindOutputIndexByNick(NickNameForZuiOutput(kind)) >= 0
+    End Function
+
+    Private Function NextZuiKindToInsert() As ZuiOptionalKind
+        For Each kind As ZuiOptionalKind In ZuiCanonicalOrder
+            If Not HasZuiInput(kind) Then Return kind
+        Next
+        Return ZuiOptionalKind.None
+    End Function
+
+    Private Function NextZuiOutputToInsert() As ZuiOptionalOutputKind
+        For Each kind As ZuiOptionalOutputKind In ZuiOutputOrder
+            If Not HasZuiOutput(kind) Then Return kind
+        Next
+        Return ZuiOptionalOutputKind.None
+    End Function
+
+    Private Function CanonicalInsertIndex(kind As ZuiOptionalKind) As Integer
+        Dim idx As Integer = BaseInputCount
+        For Each k As ZuiOptionalKind In ZuiCanonicalOrder
+            If k = kind Then Return idx
+            If HasZuiInput(k) Then idx += 1
+        Next
+        Return Math.Max(BaseInputCount, Params.Input.Count)
+    End Function
+
+    Private Function CanonicalOutputInsertIndex(kind As ZuiOptionalOutputKind) As Integer
+        Dim idx As Integer = BaseOutputCount
+        For Each k As ZuiOptionalOutputKind In ZuiOutputOrder
+            If k = kind Then Return idx
+            If HasZuiOutput(k) Then idx += 1
+        Next
+        Return Math.Max(BaseOutputCount, Params.Output.Count)
+    End Function
+
+    Private Shared Function CreateBoolZuiParam(name As String, nick As String, description As String) As Grasshopper.Kernel.Parameters.Param_Boolean
+        Return New Grasshopper.Kernel.Parameters.Param_Boolean With {
+            .Optional = True,
+            .Name = name,
+            .NickName = nick,
+            .Description = description,
+            .Access = GH_ParamAccess.item
+        }
+    End Function
+
+    Private Function CreateZuiParam(kind As ZuiOptionalKind) As IGH_Param
+        Select Case kind
+            Case ZuiOptionalKind.Active
+                Return CreateBoolZuiParam("Active", "Ac",
+                    "When true, viewport picking is enabled (overrides Lock unselected). Wire a Boolean Toggle to gate interaction from upstream.")
+            Case ZuiOptionalKind.PreselectedIndices
+                Return New Grasshopper.Kernel.Parameters.Param_Integer With {
+                    .Optional = True,
+                    .Name = "Preselected indices",
+                    .NickName = "Ix",
+                    .Description = "Tree of branch-local indices to preselect (paths should match the geometry input; a single branch broadcasts those indices to every path). Viewport picking can override.",
+                    .Access = GH_ParamAccess.tree
+                }
+            Case ZuiOptionalKind.OutputNulls
+                Return CreateBoolZuiParam("Output nulls", "On",
+                    "Mirror the input tree on all active outputs: null where an item is not in that list.")
+            Case ZuiOptionalKind.LockUnselected
+                Return CreateBoolZuiParam("Lock unselected", "Lu",
+                    "When true, viewport picking works only while this component is selected on the Grasshopper canvas. Overridden by Active when that input is present.")
+            Case ZuiOptionalKind.PreserveChanges
+                Return CreateBoolZuiParam("Preserve changes", "Pr",
+                    "Keep selection flags per item index when upstream geometry changes.")
+            Case ZuiOptionalKind.ProximityCache
+                Return CreateBoolZuiParam("Proximity cache", "Px",
+                    "When the list changes, re-attach each selection to the nearest cached geometry instead of the list index.")
+            Case ZuiOptionalKind.SaveShifted
+                Return CreateBoolZuiParam("Save shifted", "Ss",
+                    "When proximity cache is on, remember selections for geometry that leaves the list and restore them if it returns.")
+            Case ZuiOptionalKind.ClearCache
+                Return CreateBoolZuiParam("Clear cache", "Cc",
+                    "Pulse true to clear all selections (rising edge only).")
+        End Select
+        Return Nothing
+    End Function
+
+    Private Function CreateZuiOutputParam(kind As ZuiOptionalOutputKind) As IGH_Param
+        Select Case kind
+            Case ZuiOptionalOutputKind.UnselectedIndex
+                Return New Grasshopper.Kernel.Parameters.Param_Integer With {
+                    .Name = "Index (unselected)",
+                    .NickName = "Iu",
+                    .Description = "Index of each unselected item within its input tree branch.",
+                    .Access = GH_ParamAccess.tree
+                }
+            Case ZuiOptionalOutputKind.UnselectedGeometry
+                Return New Grasshopper.Kernel.Parameters.Param_Geometry With {
+                    .Name = "Geometry (unselected)",
+                    .NickName = "Gu",
+                    .Description = "Unselected geometry.",
+                    .Access = GH_ParamAccess.tree
+                }
+        End Select
+        Return Nothing
+    End Function
+
+    Private Sub SyncFeatureFlagsFromInputs()
+        PreselectedIndices = HasZuiInput(ZuiOptionalKind.PreselectedIndices)
+        OutputSplitLists = HasZuiOutput(ZuiOptionalOutputKind.UnselectedIndex)
+        OutputNulls = HasZuiInput(ZuiOptionalKind.OutputNulls)
+        SaveShifted = HasZuiInput(ZuiOptionalKind.SaveShifted)
+    End Sub
+
+    Private Function ZuiInputWired(ix As Integer) As Boolean
+        If ix < 0 OrElse Params Is Nothing Then Return False
+        Dim p As IGH_Param = Params.Input(ix)
+        Return p IsNot Nothing AndAlso p.SourceCount > 0
+    End Function
+
+    Private Function MenuBoolChecked(defaultValue As Boolean, kind As ZuiOptionalKind) As Boolean
+        Dim ix As Integer = FindInputIndexByNick(NickNameForZuiKind(kind))
+        If ix >= 0 AndAlso ZuiInputWired(ix) Then Return ReadBoolInputVolatile(ix, defaultValue)
+        Return defaultValue
+    End Function
+
+    Private Sub SetZuiKindEnabled(kind As ZuiOptionalKind, enabled As Boolean)
+        If kind = ZuiOptionalKind.None Then Return
+        If enabled Then
+            If HasZuiInput(kind) Then Return
+            Dim param As IGH_Param = CreateZuiParam(kind)
+            If param Is Nothing Then Return
+            Params.RegisterInputParam(param, CanonicalInsertIndex(kind))
+        Else
+            Dim ix As Integer = FindInputIndexByNick(NickNameForZuiKind(kind))
+            If ix < 0 Then Return
+            Dim p As IGH_Param = Params.Input(ix)
+            p.RemoveAllSources()
+            Params.UnregisterInputParameter(p)
+        End If
+        SyncFeatureFlagsFromInputs()
+        VariableParameterMaintenance()
+        Params.OnParametersChanged()
+    End Sub
+
+    Private Sub SetZuiOutputKindEnabled(kind As ZuiOptionalOutputKind, enabled As Boolean)
+        If kind = ZuiOptionalOutputKind.None Then Return
+        If enabled Then
+            If HasZuiOutput(kind) Then Return
+            Dim param As IGH_Param = CreateZuiOutputParam(kind)
+            If param Is Nothing Then Return
+            Params.RegisterOutputParam(param, CanonicalOutputInsertIndex(kind))
+        Else
+            While Params.Output.Count > BaseOutputCount
+                Params.UnregisterOutputParameter(Params.Output(Params.Output.Count - 1))
+            End While
+        End If
+        SyncFeatureFlagsFromInputs()
+        VariableParameterMaintenance()
+        Params.OnParametersChanged()
+    End Sub
+
+    Friend Sub SyncOptionalInputsFromFlags()
+        EnsureZuiMatchesFlag(ZuiOptionalKind.PreselectedIndices, PreselectedIndices)
+        EnsureZuiOutputMatchesFlag(ZuiOptionalOutputKind.UnselectedIndex, OutputSplitLists)
+        EnsureZuiMatchesFlag(ZuiOptionalKind.OutputNulls, OutputNulls)
+        If MenuBoolChecked(ProximityCache, ZuiOptionalKind.ProximityCache) Then
+            EnsureZuiMatchesFlag(ZuiOptionalKind.SaveShifted, SaveShifted)
+        End If
+        VariableParameterMaintenance()
+        Params.OnParametersChanged()
+    End Sub
+
+    Private Sub EnsureZuiMatchesFlag(kind As ZuiOptionalKind, shouldHave As Boolean)
+        If shouldHave Then
+            If Not HasZuiInput(kind) Then
+                Dim param As IGH_Param = CreateZuiParam(kind)
+                If param IsNot Nothing Then Params.RegisterInputParam(param, CanonicalInsertIndex(kind))
+            End If
+        ElseIf HasZuiInput(kind) Then
+            Dim ix As Integer = FindInputIndexByNick(NickNameForZuiKind(kind))
+            If ix >= 0 Then
+                Dim p As IGH_Param = Params.Input(ix)
+                p.RemoveAllSources()
+                Params.UnregisterInputParameter(p)
+            End If
+        End If
+    End Sub
+
+    Private Sub EnsureZuiOutputMatchesFlag(kind As ZuiOptionalOutputKind, shouldHave As Boolean)
+        If shouldHave Then
+            If Not HasZuiOutput(kind) Then
+                Dim param As IGH_Param = CreateZuiOutputParam(kind)
+                If param IsNot Nothing Then Params.RegisterOutputParam(param, CanonicalOutputInsertIndex(kind))
+            End If
+        ElseIf HasZuiOutput(kind) Then
+            While Params.Output.Count > BaseOutputCount
+                Params.UnregisterOutputParameter(Params.Output(Params.Output.Count - 1))
+            End While
+        End If
+    End Sub
+
+    Private Function ReadBoolInputVolatile(ix As Integer, defaultIfUnwired As Boolean) As Boolean
+        If ix < 0 OrElse Params Is Nothing Then Return defaultIfUnwired
+        Dim p As IGH_Param = Params.Input(ix)
+        If p Is Nothing OrElse p.SourceCount = 0 Then Return defaultIfUnwired
+        If p.VolatileDataCount = 0 Then Return defaultIfUnwired
+        Dim goo As IGH_Goo = p.VolatileData.AllData(True).FirstOrDefault()
+        Dim gb As GH_Boolean = TryCast(goo, GH_Boolean)
+        If gb IsNot Nothing Then Return gb.Value
+        Return defaultIfUnwired
+    End Function
+
+    Private Sub ApplyBoolInput(DA As IGH_DataAccess, ix As Integer, ByRef target As Boolean, defaultIfUnwired As Boolean)
+        If ix < 0 Then Return
+        If Params.Input(ix).SourceCount > 0 Then
+            Dim v As Boolean = defaultIfUnwired
+            If DA.GetData(ix, v) Then target = v
+        Else
+            target = defaultIfUnwired
+        End If
+    End Sub
+
+    Private Sub ApplyZuiBooleanInputs(DA As IGH_DataAccess)
+        ApplyBoolInput(DA, FindInputIndexByNick("On"), OutputNulls, False)
+        ApplyBoolInput(DA, FindInputIndexByNick("Lu"), LockUnselected, True)
+        ApplyBoolInput(DA, FindInputIndexByNick("Pr"), PreserveChanges, True)
+        ApplyBoolInput(DA, FindInputIndexByNick("Px"), ProximityCache, False)
+        ApplyBoolInput(DA, FindInputIndexByNick("Ss"), SaveShifted, False)
+
+        Dim ccIx As Integer = FindInputIndexByNick("Cc")
+        If ccIx >= 0 AndAlso Params.Input(ccIx).SourceCount > 0 Then
+            Dim pulse As Boolean = False
+            If DA.GetData(ccIx, pulse) Then
+                If pulse AndAlso Not _clearCacheInputPrev Then ClearSelectionCacheInternal()
+                _clearCacheInputPrev = pulse
+            End If
+        Else
+            _clearCacheInputPrev = False
+        End If
+    End Sub
+
+    Private Sub ClearSelectionCacheInternal()
         Selected.Clear()
         ShiftedSelectionKeys.Clear()
         CacheGeometries = Nothing
@@ -506,11 +842,69 @@ Public Class GeometrySelectComp
         Me.ExpireSolution(True)
     End Sub
 
-    Private Sub Menu_LockUnselected()
-        RecordUndoEvent("Selector Lock Unselected", New GeometrySelectUndo(Me))
-        LockUnselected = Not LockUnselected
-        SyncMouse()
-    End Sub
+    Private Function IsActiveForViewport() As Boolean
+        Dim acIx As Integer = FindActiveInputIndex()
+        If acIx >= 0 Then Return ReadBoolInputVolatile(acIx, True)
+        Return True
+    End Function
+
+    Private Function IsSelectionAllowedForViewport() As Boolean
+        If Not IsActiveForViewport() Then Return False
+        If FindActiveInputIndex() >= 0 Then Return True
+        Dim luIx As Integer = FindInputIndexByNick("Lu")
+        If luIx >= 0 Then
+            Return Not ReadBoolInputVolatile(luIx, True) OrElse (Me.Attributes IsNot Nothing AndAlso Me.Attributes.Selected)
+        End If
+        Return Not LockUnselected OrElse (Me.Attributes IsNot Nothing AndAlso Me.Attributes.Selected)
+    End Function
+
+    Private Function KindToInsertAt(index As Integer) As ZuiOptionalKind
+        If index < BaseInputCount OrElse index > Params.Input.Count Then Return ZuiOptionalKind.None
+        If index = Params.Input.Count Then Return NextZuiKindToInsert()
+        Dim targetSlot As Integer = index - BaseInputCount
+        Dim canonSlot As Integer = 0
+        For Each k As ZuiOptionalKind In ZuiCanonicalOrder
+            If canonSlot = targetSlot Then
+                If Not HasZuiInput(k) Then Return k
+                Return ZuiOptionalKind.None
+            End If
+            canonSlot += 1
+        Next
+        Return ZuiOptionalKind.None
+    End Function
+
+    Private Function IsRemovableZuiInput(index As Integer) As Boolean
+        If index < BaseInputCount OrElse index >= Params.Input.Count Then Return False
+        Dim nick As String = Params.Input(index).NickName
+        For Each k As ZuiOptionalKind In ZuiCanonicalOrder
+            If String.Equals(nick, NickNameForZuiKind(k), StringComparison.OrdinalIgnoreCase) Then Return True
+        Next
+        Return False
+    End Function
+
+    Private Function KindToInsertOutputAt(index As Integer) As ZuiOptionalOutputKind
+        If index < BaseOutputCount OrElse index > Params.Output.Count Then Return ZuiOptionalOutputKind.None
+        If index = Params.Output.Count Then Return NextZuiOutputToInsert()
+        Dim targetSlot As Integer = index - BaseOutputCount
+        Dim canonSlot As Integer = 0
+        For Each k As ZuiOptionalOutputKind In ZuiOutputOrder
+            If canonSlot = targetSlot Then
+                If Not HasZuiOutput(k) Then Return k
+                Return ZuiOptionalOutputKind.None
+            End If
+            canonSlot += 1
+        Next
+        Return ZuiOptionalOutputKind.None
+    End Function
+
+    Private Function IsRemovableZuiOutput(index As Integer) As Boolean
+        If index < BaseOutputCount OrElse index >= Params.Output.Count Then Return False
+        Dim nick As String = Params.Output(index).NickName
+        For Each k As ZuiOptionalOutputKind In ZuiOutputOrder
+            If String.Equals(nick, NickNameForZuiOutput(k), StringComparison.OrdinalIgnoreCase) Then Return True
+        Next
+        Return False
+    End Function
 
 #End Region
 
@@ -563,6 +957,8 @@ Public Class GeometrySelectComp
 
     Friend PickMouse As GeometrySelectMouse
 
+    Private _clearCacheInputPrev As Boolean = False
+
     Friend Sub SetSelectionFromUndo(newSelected As List(Of Boolean), newPreserve As Boolean, newProximity As Boolean,
                                     newSaveShifted As Boolean, newShiftedKeys As List(Of GeometryProximityKey),
                                     newPreselected As Boolean, newSplit As Boolean, newNulls As Boolean, newLockUnselected As Boolean)
@@ -582,8 +978,7 @@ Public Class GeometrySelectComp
 
     Friend Sub SyncOutputParameters()
         If Params Is Nothing Then Return
-        VariableParameterMaintenance()
-        Params.OnParametersChanged()
+        SyncOptionalInputsFromFlags()
     End Sub
 
     Friend Enum SelectionApplyMode
@@ -647,9 +1042,16 @@ Public Class GeometrySelectComp
     Friend RectSelectEnd As Drawing.Point
 
     Friend Sub SetRectSelectState(active As Boolean, startPt As Drawing.Point, endPt As Drawing.Point)
+        Dim wasActive As Boolean = RectSelectActive
         RectSelectActive = active
         RectSelectStart = startPt
         RectSelectEnd = endPt
+        If wasActive AndAlso Not active Then
+            Try
+                Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
+            Catch
+            End Try
+        End If
     End Sub
 
     Private Sub ShutDownInteraction()
@@ -657,7 +1059,7 @@ Public Class GeometrySelectComp
     End Sub
 
     Friend Sub SyncMouse()
-        Dim selectionOk As Boolean = Me.Attributes IsNot Nothing AndAlso (Not LockUnselected OrElse Me.Attributes.Selected)
+        Dim selectionOk As Boolean = IsSelectionAllowedForViewport()
         Dim want As Boolean =
             selectionOk AndAlso
             Not Me.Locked AndAlso
@@ -1181,6 +1583,9 @@ Public Class GeometrySelectComp
             Exit Sub
         End If
 
+        SyncFeatureFlagsFromInputs()
+        ApplyZuiBooleanInputs(DA)
+
         Dim newGeoms As New List(Of GeometryBase)
         Dim newPaths As New List(Of GH_Path)
         Dim newBranchIndices As New List(Of Integer)
@@ -1232,14 +1637,11 @@ Public Class GeometrySelectComp
         ApplyPreselectedIndicesIfNeeded(DA, hadGeometryCache, geometryChanged)
 
         SetOutputTrees(DA, data)
+        SyncMouse()
     End Sub
 
     Private Function FindPreselectInputIndex() As Integer
-        If Params Is Nothing Then Return -1
-        For i As Integer = 0 To Params.Input.Count - 1
-            If Params.Input(i).NickName = "Ix" Then Return i
-        Next
-        Return -1
+        Return FindInputIndexByNick("Ix")
     End Function
 
     Private Shared Function HasAnySelection(flags As List(Of Boolean)) As Boolean
@@ -1284,15 +1686,25 @@ Public Class GeometrySelectComp
 
     Private Sub ApplyPreselectedIndices(preselectData As GH_Structure(Of GH_Integer))
         Dim byPath As New Dictionary(Of GH_Path, HashSet(Of Integer))
-        If preselectData IsNot Nothing Then
-            For Each path As GH_Path In preselectData.Paths
-                Dim hs As New HashSet(Of Integer)
-                For Each gi As GH_Integer In preselectData.DataList(path)
+        Dim broadcastIndices As HashSet(Of Integer) = Nothing
+        If preselectData IsNot Nothing AndAlso preselectData.DataCount > 0 Then
+            If preselectData.PathCount = 1 Then
+                broadcastIndices = New HashSet(Of Integer)
+                For Each gi As GH_Integer In preselectData.AllData(True)
                     If gi Is Nothing Then Continue For
-                    hs.Add(gi.Value)
+                    broadcastIndices.Add(gi.Value)
                 Next
-                If hs.Count > 0 Then byPath(path) = hs
-            Next
+                If broadcastIndices.Count = 0 Then broadcastIndices = Nothing
+            Else
+                For Each path As GH_Path In preselectData.Paths
+                    Dim hs As New HashSet(Of Integer)
+                    For Each gi As GH_Integer In preselectData.DataList(path)
+                        If gi Is Nothing Then Continue For
+                        hs.Add(gi.Value)
+                    Next
+                    If hs.Count > 0 Then byPath(path) = hs
+                Next
+            End If
         End If
 
         While Selected.Count < Geometries.Count
@@ -1303,8 +1715,14 @@ Public Class GeometrySelectComp
             Selected(i) = False
             Dim p As GH_Path = ItemPaths(i)
             Dim j As Integer = ItemBranchIndices(i)
-            Dim hs As HashSet(Of Integer) = Nothing
-            If byPath.TryGetValue(p, hs) AndAlso hs.Contains(j) Then
+            Dim match As Boolean = False
+            If broadcastIndices IsNot Nothing Then
+                match = broadcastIndices.Contains(j)
+            Else
+                Dim hs As HashSet(Of Integer) = Nothing
+                match = byPath.TryGetValue(p, hs) AndAlso hs.Contains(j)
+            End If
+            If match Then
                 Dim hasGeom As Boolean = Geometries(i) IsNot Nothing
                 Dim hasInst As Boolean = i < InstanceGoos.Count AndAlso InstanceGoos(i) IsNot Nothing
                 If hasGeom OrElse hasInst Then Selected(i) = True
@@ -1313,25 +1731,30 @@ Public Class GeometrySelectComp
     End Sub
 
     Private Sub ApplyPreselectedIndicesIfNeeded(DA As IGH_DataAccess, hadGeometryCache As Boolean, geometryChanged As Boolean)
-        If Not PreselectedIndices Then Return
         Dim preIx As Integer = FindPreselectInputIndex()
-        If preIx < 0 Then Return
+        If preIx < 0 OrElse Params.Input(preIx).SourceCount = 0 Then Return
 
         Dim preData As New GH_Structure(Of GH_Integer)
-        DA.GetDataTree(preIx, preData)
+        If Not DA.GetDataTree(preIx, preData) Then Return
 
         Dim treeChanged As Boolean = PreselectTreeChanged(preData)
         Dim resetByGeometry As Boolean = (Not hadGeometryCache) OrElse (geometryChanged AndAlso Not PreserveChanges AndAlso Not ProximityCache)
+        Dim shouldApply As Boolean = False
 
         If treeChanged Then
-            If CachePreselectTree Is Nothing AndAlso HasAnySelection(Selected) Then
-                CachePreselectTree = ClonePreselectTree(preData)
-            Else
-                ApplyPreselectedIndices(preData)
-                CachePreselectTree = ClonePreselectTree(preData)
+            If preData.DataCount > 0 Then
+                shouldApply = True
+            ElseIf Not HasAnySelection(Selected) Then
+                shouldApply = True
             End If
-        ElseIf resetByGeometry Then
+        ElseIf resetByGeometry AndAlso preData.DataCount > 0 Then
+            shouldApply = True
+        End If
+
+        If shouldApply Then
             ApplyPreselectedIndices(preData)
+        End If
+        If treeChanged OrElse resetByGeometry Then
             CachePreselectTree = ClonePreselectTree(preData)
         End If
     End Sub
@@ -1592,9 +2015,10 @@ Public Class GeometrySelectComp
         reader.TryGetBoolean("GS_Proximity", prox)
         ProximityCache = prox
 
-        Dim saveShifted As Boolean = False
-        reader.TryGetBoolean("GS_SaveShifted", saveShifted)
-        SaveShifted = saveShifted
+        Dim loadedSaveShifted As Boolean = False
+        If reader.TryGetBoolean("GS_SaveShifted", loadedSaveShifted) Then
+            Me.SaveShifted = loadedSaveShifted
+        End If
 
         Dim split As Boolean = False
         reader.TryGetBoolean("GS_Split", split)
@@ -1642,7 +2066,7 @@ Public Class GeometrySelectComp
             Next
         End If
 
-        VariableParameterMaintenance()
+        SyncOptionalInputsFromFlags()
         Return MyBase.Read(reader)
     End Function
 
@@ -1651,44 +2075,28 @@ Public Class GeometrySelectComp
 #Region "Variable parameters"
 
     Public Function CanInsertParameter(side As GH_ParameterSide, index As Integer) As Boolean Implements IGH_VariableParameterComponent.CanInsertParameter
+        If side = GH_ParameterSide.Input Then Return KindToInsertAt(index) <> ZuiOptionalKind.None
+        If side = GH_ParameterSide.Output Then Return KindToInsertOutputAt(index) <> ZuiOptionalOutputKind.None
         Return False
     End Function
 
     Public Function CanRemoveParameter(side As GH_ParameterSide, index As Integer) As Boolean Implements IGH_VariableParameterComponent.CanRemoveParameter
+        If side = GH_ParameterSide.Input Then Return IsRemovableZuiInput(index)
+        If side = GH_ParameterSide.Output Then Return IsRemovableZuiOutput(index)
         Return False
     End Function
 
     Public Function CreateParameter(side As GH_ParameterSide, index As Integer) As IGH_Param Implements IGH_VariableParameterComponent.CreateParameter
         If side = GH_ParameterSide.Input Then
-            If index = 1 Then
-                Dim p As New Grasshopper.Kernel.Parameters.Param_Integer()
-                p.Name = "Preselected indices"
-                p.NickName = "Ix"
-                p.Description = "Tree of branch-local indices to preselect (paths should match the geometry input). Viewport picking can override."
-                p.Access = GH_ParamAccess.tree
-                p.Optional = True
-                Return p
-            End If
-            Return Nothing
+            Dim kind As ZuiOptionalKind = KindToInsertAt(index)
+            If kind = ZuiOptionalKind.None Then Return Nothing
+            Return CreateZuiParam(kind)
         End If
-
-        If side <> GH_ParameterSide.Output Then Return Nothing
-        Select Case index
-            Case 2
-                Dim p As New Grasshopper.Kernel.Parameters.Param_Integer()
-                p.Name = "Index (unselected)"
-                p.NickName = "Iu"
-                p.Description = "Index of each unselected item within its input tree branch."
-                p.Access = GH_ParamAccess.tree
-                Return p
-            Case 3
-                Dim p As New Grasshopper.Kernel.Parameters.Param_Geometry()
-                p.Name = "Geometry (unselected)"
-                p.NickName = "Gu"
-                p.Description = "Unselected geometry."
-                p.Access = GH_ParamAccess.tree
-                Return p
-        End Select
+        If side = GH_ParameterSide.Output Then
+            Dim outKind As ZuiOptionalOutputKind = KindToInsertOutputAt(index)
+            If outKind = ZuiOptionalOutputKind.None Then Return Nothing
+            Return CreateZuiOutputParam(outKind)
+        End If
         Return Nothing
     End Function
 
@@ -1698,26 +2106,20 @@ Public Class GeometrySelectComp
 
     Public Sub VariableParameterMaintenance() Implements IGH_VariableParameterComponent.VariableParameterMaintenance
         If Params Is Nothing Then Return
-
-        Dim preIx As Integer = FindPreselectInputIndex()
-        If Not PreselectedIndices AndAlso preIx >= 0 Then
-            Dim p As IGH_Param = Params.Input(preIx)
-            p.RemoveAllSources()
-            Params.UnregisterInputParameter(p)
-        ElseIf PreselectedIndices AndAlso preIx < 0 Then
-            Dim param As IGH_Param = CreateParameter(GH_ParameterSide.Input, 1)
-            If param IsNot Nothing Then Params.RegisterInputParam(param, 1)
-        End If
+        SyncFeatureFlagsFromInputs()
+        If Not HasZuiInput(ZuiOptionalKind.PreselectedIndices) Then CachePreselectTree = Nothing
 
         If OutputSplitLists Then
-            While Params.Output.Count < 4
-                Dim index As Integer = Params.Output.Count
-                Dim param As IGH_Param = CreateParameter(GH_ParameterSide.Output, index)
-                If param Is Nothing Then Exit While
-                Params.RegisterOutputParam(param)
-            End While
-        Else
-            While Params.Output.Count > 2
+            If Not HasZuiOutput(ZuiOptionalOutputKind.UnselectedIndex) Then
+                Dim p As IGH_Param = CreateZuiOutputParam(ZuiOptionalOutputKind.UnselectedIndex)
+                If p IsNot Nothing Then Params.RegisterOutputParam(p, CanonicalOutputInsertIndex(ZuiOptionalOutputKind.UnselectedIndex))
+            End If
+            If Not HasZuiOutput(ZuiOptionalOutputKind.UnselectedGeometry) Then
+                Dim p As IGH_Param = CreateZuiOutputParam(ZuiOptionalOutputKind.UnselectedGeometry)
+                If p IsNot Nothing Then Params.RegisterOutputParam(p, CanonicalOutputInsertIndex(ZuiOptionalOutputKind.UnselectedGeometry))
+            End If
+        ElseIf HasZuiOutput(ZuiOptionalOutputKind.UnselectedIndex) Then
+            While Params.Output.Count > BaseOutputCount
                 Params.UnregisterOutputParameter(Params.Output(Params.Output.Count - 1))
             End While
         End If

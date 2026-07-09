@@ -13,6 +13,60 @@ Imports Rhino.Geometry
 
 Public Class CurveSliderComp
     Inherits GH_Component
+    Implements IGH_VariableParameterComponent
+
+    ''' <summary>Optional inputs exposed via canvas ZUI (+) in fixed order after the curve input.</summary>
+    Private Enum ZuiOptionalKind
+        None = -1
+        Active = 0
+        RealValues = 1
+        CustomDomain = 2
+        SnapValues = 3
+        SnappingTicks = 4
+        StartingPosition = 5
+        LockUnselected = 6
+        PreserveChanges = 7
+        ProximityCache = 8
+        ClearCache = 9
+    End Enum
+
+    ''' <summary>Optional outputs exposed via canvas ZUI (+) after P and t.</summary>
+    Private Enum ZuiOptionalOutputKind
+        None = -1
+        NormalizedValue = 0
+        CurveDomain = 1
+    End Enum
+
+    Private Shared ReadOnly ZuiCanonicalOrder As ZuiOptionalKind() = {
+        ZuiOptionalKind.Active,
+        ZuiOptionalKind.RealValues,
+        ZuiOptionalKind.CustomDomain,
+        ZuiOptionalKind.SnapValues,
+        ZuiOptionalKind.SnappingTicks,
+        ZuiOptionalKind.StartingPosition,
+        ZuiOptionalKind.LockUnselected,
+        ZuiOptionalKind.PreserveChanges,
+        ZuiOptionalKind.ProximityCache,
+        ZuiOptionalKind.ClearCache
+    }
+
+    Private Shared ReadOnly ZuiOutputOrder As ZuiOptionalOutputKind() = {
+        ZuiOptionalOutputKind.NormalizedValue,
+        ZuiOptionalOutputKind.CurveDomain
+    }
+
+    ''' <summary>Per-curve settings resolved from optional tree inputs (paths match curve input C).</summary>
+    Friend Structure CurveSliderSlotSettings
+        Public Active As Boolean
+        Public ShowRealValue As Boolean
+        Public CustomInterval As Interval
+        Public HasCustomInterval As Boolean
+        Public SnapDisplayValues As List(Of Double)
+        Public SnapTickStep As Double
+        Public HasSnapTickStep As Boolean
+    End Structure
+
+    Friend SlotSettings As CurveSliderSlotSettings()
 
     Public Sub New()
         MyBase.New("Curve Slider", "CrvSlider",
@@ -70,6 +124,11 @@ Public Class CurveSliderComp
         m_attributes = New CurveSliderCompAtt(Me)
     End Sub
 
+    Public Overrides Sub AddedToDocument(document As GH_Document)
+        MyBase.AddedToDocument(document)
+        VariableParameterMaintenance()
+    End Sub
+
     Public Overrides ReadOnly Property IsPreviewCapable As Boolean
         Get
             Return True
@@ -116,7 +175,7 @@ Public Class CurveSliderComp
 
     Protected Overrides Sub AppendAdditionalComponentMenuItems(menu As Windows.Forms.ToolStripDropDown)
 
-        Dim realVals As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Real values", AddressOf Menu_RealValues, True, Me.ShowRealValue)
+        Dim realVals As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Real values", AddressOf Menu_RealValues, True, MenuBoolChecked(ShowRealValue, ZuiOptionalKind.RealValues))
         realVals.ToolTipText = "Show and enter values in the curve's real parameter domain instead of normalized 0-1. Ignored while a custom domain is set."
 
         Dim customDom As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Custom domain", AddressOf Menu_CustomDomain, True, Me.CustomDomain)
@@ -125,27 +184,47 @@ Public Class CurveSliderComp
         Dim snapVals As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Snapping values", AddressOf Menu_SnapValues, True, Me.SnapValues)
         snapVals.ToolTipText = "Adds an S input (list of values in the current display units): dragging sticks to those values, shown as short ticks on the curve."
 
-        Dim snapTicks As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Snapping ticks", AddressOf Menu_SnappingTicks, True, Me.SnappingTicks)
+        Dim snapTicks As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Snapping ticks", AddressOf Menu_SnappingTicks, True, HasZuiInput(ZuiOptionalKind.SnappingTicks) OrElse Me.SnappingTicks)
         snapTicks.ToolTipText = "While dragging, stick the slider to tick steps. Adds a T input for a fixed step (e.g. 5 → 0,5,10…); leave T empty to snap to the zoom-adaptive ruler."
+
+        Dim startPos As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Starting position", AddressOf Menu_StartingPosition, True, Me.StartingPosition)
+        startPos.ToolTipText = "Adds a Sp input for the initial slider location per curve. Units follow Real values / Custom domain when those are on; otherwise normalized 0-1. Viewport edits are preserved."
 
         Menu_AppendSeparator(menu)
 
-        Dim lockUnsel As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Lock unselected", AddressOf Menu_LockUnselected, True, Me.LockUnselected)
+        Dim lockUnsel As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Lock unselected", AddressOf Menu_LockUnselected, True, MenuBoolChecked(LockUnselected, ZuiOptionalKind.LockUnselected))
         lockUnsel.ToolTipText = "When on, the slider can be dragged or edited only while this component is selected on the Grasshopper canvas."
 
-        Dim preserve As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Preserve changes", AddressOf Menu_PreserveChanges, True, Me.PreserveChanges)
+        Dim preserve As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Preserve changes", AddressOf Menu_PreserveChanges, True, MenuBoolChecked(PreserveChanges, ZuiOptionalKind.PreserveChanges))
         preserve.ToolTipText = "Keep slider values (per item index) when upstream curves move or change."
 
-        Dim proximity As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Proximity cache", AddressOf Menu_ProximityCache, True, Me.ProximityCache)
+        Dim proximity As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Proximity cache", AddressOf Menu_ProximityCache, True, MenuBoolChecked(ProximityCache, ZuiOptionalKind.ProximityCache))
         proximity.ToolTipText = "When the curve list changes, re-attach each slider to the nearest new curve by point location instead of the list index."
 
         Dim cc As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Clear cache", AddressOf Menu_ClearCache, True)
         cc.ToolTipText = "Reset all slider values to the curve midpoint."
     End Sub
 
+    Private Function StartingPositionInputDescription() As String
+        If CustomDomain Then
+            Return "Initial slider value per curve in the custom domain (tree paths match the curve input). Viewport edits are preserved; changing this input does not reset cached slider values."
+        ElseIf ShowRealValue Then
+            Return "Initial slider value per curve in the curve's real parameter domain (tree paths match the curve input). Viewport edits are preserved; changing this input does not reset cached slider values."
+        Else
+            Return "Normalized curve parameter (0-1) for the initial slider location per curve (tree paths match the curve input). Viewport edits are preserved; changing this input does not reset cached slider values."
+        End If
+    End Function
+
+    Private Sub RefreshStartingPositionInputDescription()
+        Dim spIx As Integer = FindStartingPositionInputIndex()
+        If spIx < 0 Then Return
+        Params.Input(spIx).Description = StartingPositionInputDescription()
+    End Sub
+
     Private Sub Menu_RealValues()
         RecordUndoEvent("Curve Slider Values", New CurveSliderUndo(Me))
         ShowRealValue = Not ShowRealValue
+        RefreshStartingPositionInputDescription()
         Me.ExpireSolution(True)
         Try
             Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
@@ -155,27 +234,30 @@ Public Class CurveSliderComp
 
     Private Sub Menu_CustomDomain()
         RecordUndoEvent("Curve Slider Domain", New CurveSliderUndo(Me))
-        CustomDomain = Not CustomDomain
-        SyncOptionalInputs()
+        SetZuiKindEnabled(ZuiOptionalKind.CustomDomain, Not CustomDomain)
         Me.ExpireSolution(True)
     End Sub
 
     Private Sub Menu_SnapValues()
         RecordUndoEvent("Curve Slider Snapping", New CurveSliderUndo(Me))
-        SnapValues = Not SnapValues
-        SyncOptionalInputs()
+        SetZuiKindEnabled(ZuiOptionalKind.SnapValues, Not SnapValues)
         Me.ExpireSolution(True)
     End Sub
 
     Private Sub Menu_SnappingTicks()
         RecordUndoEvent("Curve Slider Snapping Ticks", New CurveSliderUndo(Me))
-        SnappingTicks = Not SnappingTicks
-        SyncOptionalInputs()
+        SetZuiKindEnabled(ZuiOptionalKind.SnappingTicks, Not (HasZuiInput(ZuiOptionalKind.SnappingTicks) OrElse SnappingTicks))
         Me.ExpireSolution(True)
         Try
             Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
         Catch
         End Try
+    End Sub
+
+    Private Sub Menu_StartingPosition()
+        RecordUndoEvent("Curve Slider Starting Position", New CurveSliderUndo(Me))
+        SetZuiKindEnabled(ZuiOptionalKind.StartingPosition, Not StartingPosition)
+        Me.ExpireSolution(True)
     End Sub
 
     Private Sub Menu_LockUnselected()
@@ -187,11 +269,13 @@ Public Class CurveSliderComp
     Private Sub Menu_PreserveChanges()
         RecordUndoEvent("Curve Slider Preserve", New CurveSliderUndo(Me))
         PreserveChanges = Not PreserveChanges
+        Me.ExpireSolution(True)
     End Sub
 
     Private Sub Menu_ProximityCache()
         RecordUndoEvent("Curve Slider Proximity", New CurveSliderUndo(Me))
         ProximityCache = Not ProximityCache
+        Me.ExpireSolution(True)
     End Sub
 
     Public Sub Menu_ClearCache()
@@ -205,7 +289,7 @@ Public Class CurveSliderComp
 
 #End Region
 
-#Region "Optional inputs"
+#Region "Optional inputs / ZUI"
 
     Private Function FindInputIndexByNick(nick As String) As Integer
         For i As Integer = 0 To Me.Params.Input.Count - 1
@@ -226,81 +310,435 @@ Public Class CurveSliderComp
         Return FindInputIndexByNick("T")
     End Function
 
-    ''' <summary>Register/unregister optional D, T and S inputs to match menu flags. Order: C, D, T, S.</summary>
-    Friend Sub SyncOptionalInputs()
-        Dim changed As Boolean = False
+    Private Function FindStartingPositionInputIndex() As Integer
+        Return FindInputIndexByNick("Sp")
+    End Function
 
-        Dim dIx As Integer = FindDomainInputIndex()
-        If Not CustomDomain AndAlso dIx >= 0 Then
-            Dim p As IGH_Param = Me.Params.Input(dIx)
-            p.RemoveAllSources()
-            Me.Params.UnregisterInputParameter(p)
-            changed = True
-        End If
+    Private Function FindRealValuesInputIndex() As Integer
+        Return FindInputIndexByNick("Rv")
+    End Function
 
-        Dim tIx As Integer = FindTickStepInputIndex()
-        If Not SnappingTicks AndAlso tIx >= 0 Then
-            Dim p As IGH_Param = Me.Params.Input(tIx)
-            p.RemoveAllSources()
-            Me.Params.UnregisterInputParameter(p)
-            changed = True
-        End If
+    Private Function FindActiveInputIndex() As Integer
+        Return FindInputIndexByNick("Ac")
+    End Function
 
-        Dim sIx As Integer = FindSnapInputIndex()
-        If Not SnapValues AndAlso sIx >= 0 Then
-            Dim p As IGH_Param = Me.Params.Input(sIx)
-            p.RemoveAllSources()
-            Me.Params.UnregisterInputParameter(p)
-            changed = True
-        End If
+    Private Function FindOutputIndexByNick(nick As String) As Integer
+        If Params Is Nothing Then Return -1
+        For i As Integer = 0 To Params.Output.Count - 1
+            If String.Equals(Params.Output(i).NickName, nick, StringComparison.OrdinalIgnoreCase) Then Return i
+        Next
+        Return -1
+    End Function
 
-        If CustomDomain AndAlso FindDomainInputIndex() < 0 Then
-            Dim pd As New Grasshopper.Kernel.Parameters.Param_Interval With {
-                .Optional = True,
-                .Name = "Domain",
-                .NickName = "D",
-                .Description = "Custom value domain for the slider (values remapped from the curve's 0-1).",
-                .Access = GH_ParamAccess.item
-            }
-            Dim insertAt As Integer = OptionalInputInsertIndex(FindTickStepInputIndex(), FindSnapInputIndex())
-            Me.Params.RegisterInputParam(pd, insertAt)
-            changed = True
-        End If
+    Private Shared Function NickNameForZuiKind(kind As ZuiOptionalKind) As String
+        Select Case kind
+            Case ZuiOptionalKind.Active : Return "Ac"
+            Case ZuiOptionalKind.RealValues : Return "Rv"
+            Case ZuiOptionalKind.CustomDomain : Return "D"
+            Case ZuiOptionalKind.SnapValues : Return "S"
+            Case ZuiOptionalKind.SnappingTicks : Return "T"
+            Case ZuiOptionalKind.StartingPosition : Return "Sp"
+            Case ZuiOptionalKind.LockUnselected : Return "Lu"
+            Case ZuiOptionalKind.PreserveChanges : Return "Pr"
+            Case ZuiOptionalKind.ProximityCache : Return "Px"
+            Case ZuiOptionalKind.ClearCache : Return "Cc"
+            Case Else : Return String.Empty
+        End Select
+    End Function
 
-        If SnappingTicks AndAlso FindTickStepInputIndex() < 0 Then
-            Dim pt As New Grasshopper.Kernel.Parameters.Param_Number With {
-                .Optional = True,
-                .Name = "Tick step",
-                .NickName = "T",
-                .Description = "Fixed tick step in display units (e.g. 5 → snap to 0,5,10…; 0.1 → 0,0.1,0.2…). Leave empty to use zoom-adaptive ruler ticks.",
-                .Access = GH_ParamAccess.item
-            }
-            Dim insertAt As Integer = OptionalInputInsertIndex(-1, FindSnapInputIndex())
-            Me.Params.RegisterInputParam(pt, insertAt)
-            changed = True
-        End If
+    Private Shared Function NickNameForZuiOutput(kind As ZuiOptionalOutputKind) As String
+        Select Case kind
+            Case ZuiOptionalOutputKind.NormalizedValue : Return "u"
+            Case ZuiOptionalOutputKind.CurveDomain : Return "Dom"
+            Case Else : Return String.Empty
+        End Select
+    End Function
 
-        If SnapValues AndAlso FindSnapInputIndex() < 0 Then
-            Dim ps As New Grasshopper.Kernel.Parameters.Param_Number With {
-                .Optional = True,
-                .Name = "Snap values",
-                .NickName = "S",
-                .Description = "Values (in the current display units) the slider sticks to while dragging; drawn as short ticks on the curve.",
-                .Access = GH_ParamAccess.list
-            }
-            Me.Params.RegisterInputParam(ps, Me.Params.Input.Count)
-            changed = True
-        End If
+    Private Function HasZuiInput(kind As ZuiOptionalKind) As Boolean
+        If kind = ZuiOptionalKind.None Then Return False
+        Return FindInputIndexByNick(NickNameForZuiKind(kind)) >= 0
+    End Function
 
-        If changed Then Me.Params.OnParametersChanged()
-    End Sub
+    Private Function HasZuiOutput(kind As ZuiOptionalOutputKind) As Boolean
+        If kind = ZuiOptionalOutputKind.None Then Return False
+        Return FindOutputIndexByNick(NickNameForZuiOutput(kind)) >= 0
+    End Function
 
-    ''' <summary>Insert index for an optional input, keeping order D → T → S after C.</summary>
-    Private Function OptionalInputInsertIndex(beforeIx As Integer, beforeIx2 As Integer) As Integer
-        If beforeIx >= 0 Then Return beforeIx
-        If beforeIx2 >= 0 Then Return beforeIx2
+    Private Function NextZuiKindToInsert() As ZuiOptionalKind
+        For Each kind As ZuiOptionalKind In ZuiCanonicalOrder
+            If Not HasZuiInput(kind) Then Return kind
+        Next
+        Return ZuiOptionalKind.None
+    End Function
+
+    Private Function NextZuiOutputToInsert() As ZuiOptionalOutputKind
+        For Each kind As ZuiOptionalOutputKind In ZuiOutputOrder
+            If Not HasZuiOutput(kind) Then Return kind
+        Next
+        Return ZuiOptionalOutputKind.None
+    End Function
+
+    Private Function CanonicalInsertIndex(kind As ZuiOptionalKind) As Integer
+        Dim idx As Integer = 1
+        For Each k As ZuiOptionalKind In ZuiCanonicalOrder
+            If k = kind Then Return idx
+            If HasZuiInput(k) Then idx += 1
+        Next
         Return Math.Max(1, Me.Params.Input.Count)
     End Function
+
+    Private Function CanonicalOutputInsertIndex(kind As ZuiOptionalOutputKind) As Integer
+        Dim idx As Integer = 2
+        For Each k As ZuiOptionalOutputKind In ZuiOutputOrder
+            If k = kind Then Return idx
+            If HasZuiOutput(k) Then idx += 1
+        Next
+        Return Math.Max(2, Me.Params.Output.Count)
+    End Function
+
+    Private Shared Function CreateBoolZuiParam(name As String, nick As String, description As String,
+                                               Optional access As GH_ParamAccess = GH_ParamAccess.item) As Grasshopper.Kernel.Parameters.Param_Boolean
+        Return New Grasshopper.Kernel.Parameters.Param_Boolean With {
+            .Optional = True,
+            .Name = name,
+            .NickName = nick,
+            .Description = description,
+            .Access = access
+        }
+    End Function
+
+    Private Function CreateTickStepParam() As Grasshopper.Kernel.Parameters.Param_Number
+        Return New Grasshopper.Kernel.Parameters.Param_Number With {
+            .Optional = True,
+            .Name = "Tick step",
+            .NickName = "T",
+            .Description = "Fixed tick step per curve in display units (tree matches C). Wire to enable snapping; leave value empty to use zoom-adaptive ruler ticks.",
+            .Access = GH_ParamAccess.tree
+        }
+    End Function
+
+    Private Function CreateZuiParam(kind As ZuiOptionalKind) As IGH_Param
+        Select Case kind
+            Case ZuiOptionalKind.Active
+                Return CreateBoolZuiParam("Active", "Ac",
+                    "When true, viewport picking is enabled for that curve (overrides Lock unselected). Tree paths match C.",
+                    GH_ParamAccess.tree)
+            Case ZuiOptionalKind.RealValues
+                Return CreateBoolZuiParam("Real values", "Rv",
+                    "When true, show and enter values in the curve's real parameter domain instead of normalized 0-1 (per curve; tree matches C). Ignored while a custom domain is set.",
+                    GH_ParamAccess.tree)
+            Case ZuiOptionalKind.CustomDomain
+                Return New Grasshopper.Kernel.Parameters.Param_Interval With {
+                    .Optional = True,
+                    .Name = "Domain",
+                    .NickName = "D",
+                    .Description = "Custom value domain per curve (tree matches C); values remapped from the curve's 0-1.",
+                    .Access = GH_ParamAccess.tree
+                }
+            Case ZuiOptionalKind.SnapValues
+                Return New Grasshopper.Kernel.Parameters.Param_Number With {
+                    .Optional = True,
+                    .Name = "Snap values",
+                    .NickName = "S",
+                    .Description = "Snap values per curve in display units (tree paths match C; all numbers on a branch apply to curves on that path).",
+                    .Access = GH_ParamAccess.tree
+                }
+            Case ZuiOptionalKind.SnappingTicks
+                Return CreateTickStepParam()
+            Case ZuiOptionalKind.StartingPosition
+                Return New Grasshopper.Kernel.Parameters.Param_Number With {
+                    .Optional = True,
+                    .Name = "Starting position",
+                    .NickName = "Sp",
+                    .Description = StartingPositionInputDescription(),
+                    .Access = GH_ParamAccess.tree
+                }
+            Case ZuiOptionalKind.LockUnselected
+                Return CreateBoolZuiParam("Lock unselected", "Lu",
+                    "When true, viewport picking works only while this component is selected on the Grasshopper canvas. Overridden by Active when that input is present.")
+            Case ZuiOptionalKind.PreserveChanges
+                Return CreateBoolZuiParam("Preserve changes", "Pr",
+                    "When true, keep slider values when upstream curves move or change.")
+            Case ZuiOptionalKind.ProximityCache
+                Return CreateBoolZuiParam("Proximity cache", "Px",
+                    "When true, re-attach each slider to the nearest new curve when the curve list changes.")
+            Case ZuiOptionalKind.ClearCache
+                Return CreateBoolZuiParam("Clear cache", "Cc",
+                    "Pulse true to reset all slider values to the starting position (rising edge only).")
+        End Select
+        Return Nothing
+    End Function
+
+    Private Function CreateZuiOutputParam(kind As ZuiOptionalOutputKind) As IGH_Param
+        Select Case kind
+            Case ZuiOptionalOutputKind.NormalizedValue
+                Return New Grasshopper.Kernel.Parameters.Param_Number With {
+                    .Name = "Normalized",
+                    .NickName = "u",
+                    .Description = "Normalized slider parameter (0-1) per curve, independent of the display/output units on t.",
+                    .Access = GH_ParamAccess.tree
+                }
+            Case ZuiOptionalOutputKind.CurveDomain
+                Return New Grasshopper.Kernel.Parameters.Param_Interval With {
+                    .Name = "Curve domain",
+                    .NickName = "Dom",
+                    .Description = "Curve parameter domain per input curve (pass-through from geometry).",
+                    .Access = GH_ParamAccess.tree
+                }
+        End Select
+        Return Nothing
+    End Function
+
+    Private Sub SyncFeatureFlagsFromInputs()
+        CustomDomain = HasZuiInput(ZuiOptionalKind.CustomDomain)
+        SnapValues = HasZuiInput(ZuiOptionalKind.SnapValues)
+        SnappingTicks = HasZuiInput(ZuiOptionalKind.SnappingTicks)
+        StartingPosition = HasZuiInput(ZuiOptionalKind.StartingPosition)
+    End Sub
+
+    Private Sub ApplyZuiInputLayout()
+        SyncFeatureFlagsFromInputs()
+
+        Dim spIx As Integer = FindStartingPositionInputIndex()
+        If spIx >= 0 Then Params.Input(spIx).Description = StartingPositionInputDescription()
+    End Sub
+
+    Private Sub SetZuiKindEnabled(kind As ZuiOptionalKind, enabled As Boolean)
+        If kind = ZuiOptionalKind.None Then Return
+        If enabled Then
+            If HasZuiInput(kind) Then Return
+            Dim param As IGH_Param = CreateZuiParam(kind)
+            If param Is Nothing Then Return
+            Me.Params.RegisterInputParam(param, CanonicalInsertIndex(kind))
+        Else
+            Dim nick As String = NickNameForZuiKind(kind)
+            Dim ix As Integer = FindInputIndexByNick(nick)
+            If ix < 0 Then Return
+            Dim p As IGH_Param = Me.Params.Input(ix)
+            p.RemoveAllSources()
+            Me.Params.UnregisterInputParameter(p)
+        End If
+        SyncFeatureFlagsFromInputs()
+        VariableParameterMaintenance()
+        Me.Params.OnParametersChanged()
+        RefreshStartingPositionInputDescription()
+    End Sub
+
+    ''' <summary>Backward-compatible name used by undo/read paths.</summary>
+    Friend Sub SyncOptionalInputs()
+        SyncOptionalInputsFromFlags()
+        Me.Params.OnParametersChanged()
+    End Sub
+
+    Private Sub SyncOptionalInputsFromFlags()
+        EnsureZuiMatchesFlag(ZuiOptionalKind.CustomDomain, CustomDomain)
+        EnsureZuiMatchesFlag(ZuiOptionalKind.SnapValues, SnapValues)
+        EnsureZuiMatchesFlag(ZuiOptionalKind.SnappingTicks, SnappingTicks)
+        EnsureZuiMatchesFlag(ZuiOptionalKind.StartingPosition, StartingPosition)
+        VariableParameterMaintenance()
+    End Sub
+
+    Private Function ZuiInputWired(ix As Integer) As Boolean
+        If ix < 0 OrElse Params Is Nothing Then Return False
+        Dim p As IGH_Param = Params.Input(ix)
+        Return p IsNot Nothing AndAlso p.SourceCount > 0
+    End Function
+
+    Private Function MenuBoolChecked(defaultValue As Boolean, kind As ZuiOptionalKind) As Boolean
+        Dim ix As Integer = FindInputIndexByNick(NickNameForZuiKind(kind))
+        If ix >= 0 AndAlso ZuiInputWired(ix) Then Return ReadBoolInputVolatile(ix, defaultValue)
+        Return defaultValue
+    End Function
+
+    Private Function ReadBoolInputVolatile(ix As Integer, defaultIfUnwired As Boolean) As Boolean
+        If ix < 0 OrElse Params Is Nothing Then Return defaultIfUnwired
+        Dim p As IGH_Param = Params.Input(ix)
+        If p Is Nothing OrElse p.SourceCount = 0 Then Return defaultIfUnwired
+        If p.VolatileDataCount = 0 Then Return defaultIfUnwired
+        Dim goo As IGH_Goo = p.VolatileData.AllData(True).FirstOrDefault()
+        Dim gb As GH_Boolean = TryCast(goo, GH_Boolean)
+        If gb IsNot Nothing Then Return gb.Value
+        Return defaultIfUnwired
+    End Function
+
+    Private Sub ApplyBoolInput(DA As IGH_DataAccess, ix As Integer, ByRef target As Boolean, defaultIfUnwired As Boolean)
+        If ix < 0 Then Return
+        If Params.Input(ix).SourceCount > 0 Then
+            Dim v As Boolean = defaultIfUnwired
+            If DA.GetData(ix, v) Then target = v
+        Else
+            target = defaultIfUnwired
+        End If
+    End Sub
+
+    Private Sub ApplyZuiBooleanInputs(DA As IGH_DataAccess)
+        ApplyBoolInput(DA, FindInputIndexByNick("Lu"), LockUnselected, True)
+        ApplyBoolInput(DA, FindInputIndexByNick("Pr"), PreserveChanges, True)
+        ApplyBoolInput(DA, FindInputIndexByNick("Px"), ProximityCache, False)
+
+        Dim ccIx As Integer = FindInputIndexByNick("Cc")
+        If ccIx >= 0 AndAlso Params.Input(ccIx).SourceCount > 0 Then
+            Dim pulse As Boolean = False
+            If DA.GetData(ccIx, pulse) Then
+                If pulse AndAlso Not _clearCacheInputPrev Then
+                    ClearSliderCacheInternal()
+                End If
+                _clearCacheInputPrev = pulse
+            End If
+        Else
+            _clearCacheInputPrev = False
+        End If
+    End Sub
+
+    Private Sub ClearSliderCacheInternal()
+        SliderParams.Clear()
+        CacheCurves = Nothing
+        CloseSliderTextBoxIfAny()
+    End Sub
+
+    Private Function IsActiveForViewport() As Boolean
+        Dim acIx As Integer = FindActiveInputIndex()
+        If acIx < 0 Then Return True
+        If HasZuiInput(ZuiOptionalKind.Active) Then
+            If SlotSettings Is Nothing Then Return True
+            For i As Integer = 0 To SlotSettings.Length - 1
+                If SlotSettings(i).Active Then Return True
+            Next
+            Return False
+        End If
+        Return ReadBoolInputVolatile(acIx, True)
+    End Function
+
+    Friend Function IsCurveActiveForViewport(index As Integer) As Boolean
+        If Not IsSelectionAllowedForViewport() Then Return False
+        If index < 0 Then Return False
+        If HasZuiInput(ZuiOptionalKind.Active) AndAlso SlotSettings IsNot Nothing AndAlso index < SlotSettings.Length Then
+            Return SlotSettings(index).Active
+        End If
+        Return IsActiveForViewport()
+    End Function
+
+    Private Function IsSelectionAllowedForViewport() As Boolean
+        If HasZuiInput(ZuiOptionalKind.Active) Then
+            If Not IsActiveForViewport() Then Return False
+        ElseIf Not IsActiveForViewport() Then
+            Return False
+        End If
+        Dim acIx As Integer = FindActiveInputIndex()
+        If acIx >= 0 Then Return True
+        Dim luIx As Integer = FindInputIndexByNick("Lu")
+        If luIx >= 0 Then
+            Return Not ReadBoolInputVolatile(luIx, True) OrElse (Me.Attributes IsNot Nothing AndAlso Me.Attributes.Selected)
+        End If
+        Return Not LockUnselected OrElse (Me.Attributes IsNot Nothing AndAlso Me.Attributes.Selected)
+    End Function
+
+    Private Sub EnsureZuiMatchesFlag(kind As ZuiOptionalKind, shouldHave As Boolean)
+        If shouldHave Then
+            If Not HasZuiInput(kind) Then
+                Dim param As IGH_Param = CreateZuiParam(kind)
+                If param IsNot Nothing Then Me.Params.RegisterInputParam(param, CanonicalInsertIndex(kind))
+            End If
+        ElseIf HasZuiInput(kind) Then
+            Dim ix As Integer = FindInputIndexByNick(NickNameForZuiKind(kind))
+            If ix >= 0 Then
+                Dim p As IGH_Param = Me.Params.Input(ix)
+                p.RemoveAllSources()
+                Me.Params.UnregisterInputParameter(p)
+            End If
+        End If
+    End Sub
+
+    Private Sub ApplyRealValuesFromInput(DA As IGH_DataAccess)
+        ' Per-curve Rv is resolved in BuildSlotSettings.
+    End Sub
+
+    Private Function KindToInsertAt(index As Integer) As ZuiOptionalKind
+        If index < 1 OrElse index > Params.Input.Count Then Return ZuiOptionalKind.None
+        If index = Params.Input.Count Then Return NextZuiKindToInsert()
+        Dim targetSlot As Integer = index - 1
+        Dim canonSlot As Integer = 0
+        For Each k As ZuiOptionalKind In ZuiCanonicalOrder
+            If canonSlot = targetSlot Then
+                If Not HasZuiInput(k) Then Return k
+                Return ZuiOptionalKind.None
+            End If
+            canonSlot += 1
+        Next
+        Return ZuiOptionalKind.None
+    End Function
+
+    Private Function IsRemovableZuiInput(index As Integer) As Boolean
+        If index < 1 OrElse index >= Params.Input.Count Then Return False
+        Dim nick As String = Params.Input(index).NickName
+        For Each k As ZuiOptionalKind In ZuiCanonicalOrder
+            If String.Equals(nick, NickNameForZuiKind(k), StringComparison.OrdinalIgnoreCase) Then Return True
+        Next
+        Return False
+    End Function
+
+    Private Function KindToInsertOutputAt(index As Integer) As ZuiOptionalOutputKind
+        If index < 2 OrElse index > Params.Output.Count Then Return ZuiOptionalOutputKind.None
+        If index = Params.Output.Count Then Return NextZuiOutputToInsert()
+        Dim targetSlot As Integer = index - 2
+        Dim canonSlot As Integer = 0
+        For Each k As ZuiOptionalOutputKind In ZuiOutputOrder
+            If canonSlot = targetSlot Then
+                If Not HasZuiOutput(k) Then Return k
+                Return ZuiOptionalOutputKind.None
+            End If
+            canonSlot += 1
+        Next
+        Return ZuiOptionalOutputKind.None
+    End Function
+
+    Private Function IsRemovableZuiOutput(index As Integer) As Boolean
+        If index < 2 OrElse index >= Params.Output.Count Then Return False
+        Dim nick As String = Params.Output(index).NickName
+        For Each k As ZuiOptionalOutputKind In ZuiOutputOrder
+            If String.Equals(nick, NickNameForZuiOutput(k), StringComparison.OrdinalIgnoreCase) Then Return True
+        Next
+        Return False
+    End Function
+
+#End Region
+
+#Region "Variable parameters (canvas ZUI)"
+
+    Public Function CanInsertParameter(side As GH_ParameterSide, index As Integer) As Boolean Implements IGH_VariableParameterComponent.CanInsertParameter
+        If side = GH_ParameterSide.Input Then Return KindToInsertAt(index) <> ZuiOptionalKind.None
+        If side = GH_ParameterSide.Output Then Return KindToInsertOutputAt(index) <> ZuiOptionalOutputKind.None
+        Return False
+    End Function
+
+    Public Function CanRemoveParameter(side As GH_ParameterSide, index As Integer) As Boolean Implements IGH_VariableParameterComponent.CanRemoveParameter
+        If side = GH_ParameterSide.Input Then Return IsRemovableZuiInput(index)
+        If side = GH_ParameterSide.Output Then Return IsRemovableZuiOutput(index)
+        Return False
+    End Function
+
+    Public Function CreateParameter(side As GH_ParameterSide, index As Integer) As IGH_Param Implements IGH_VariableParameterComponent.CreateParameter
+        If side = GH_ParameterSide.Input Then
+            Dim kind As ZuiOptionalKind = KindToInsertAt(index)
+            If kind = ZuiOptionalKind.None Then Return Nothing
+            Return CreateZuiParam(kind)
+        End If
+        If side = GH_ParameterSide.Output Then
+            Dim outKind As ZuiOptionalOutputKind = KindToInsertOutputAt(index)
+            If outKind = ZuiOptionalOutputKind.None Then Return Nothing
+            Return CreateZuiOutputParam(outKind)
+        End If
+        Return Nothing
+    End Function
+
+    Public Function DestroyParameter(side As GH_ParameterSide, index As Integer) As Boolean Implements IGH_VariableParameterComponent.DestroyParameter
+        Return True
+    End Function
+
+    Public Sub VariableParameterMaintenance() Implements IGH_VariableParameterComponent.VariableParameterMaintenance
+        If Params Is Nothing Then Return
+        ApplyZuiInputLayout()
+    End Sub
 
 #End Region
 
@@ -321,6 +759,8 @@ Public Class CurveSliderComp
     Public SnapValues As Boolean = False
     ''' <summary>While dragging, quantize to dynamic ruler tick steps. Off by default.</summary>
     Public SnappingTicks As Boolean = False
+    ''' <summary>Adds the Sp input; normalized curve parameter for initial slider location per curve.</summary>
+    Public StartingPosition As Boolean = False
 
     ''' <summary>Curves from the last solve (duplicates).</summary>
     Friend Curves As New List(Of Curve)
@@ -332,29 +772,70 @@ Public Class CurveSliderComp
     ''' <summary>Cached curves used to detect upstream changes.</summary>
     Private CacheCurves As List(Of Curve) = Nothing
 
-    ''' <summary>Custom domain from the D input this solve (Unset when absent/invalid).</summary>
+    Friend Function HasValidCustomIntervalForIndex(index As Integer) As Boolean
+        If Not CustomDomain Then Return False
+        If SlotSettings IsNot Nothing AndAlso index >= 0 AndAlso index < SlotSettings.Length Then
+            Dim iv As Interval = SlotSettings(index).CustomInterval
+            Return SlotSettings(index).HasCustomInterval AndAlso iv.IsValid AndAlso Math.Abs(iv.Length) > Rhino.RhinoMath.ZeroTolerance
+        End If
+        Return False
+    End Function
+
+    Friend Function ShowRealValueForIndex(index As Integer) As Boolean
+        If SlotSettings IsNot Nothing AndAlso index >= 0 AndAlso index < SlotSettings.Length Then
+            Return SlotSettings(index).ShowRealValue
+        End If
+        Return ShowRealValue
+    End Function
+
+    Private Function CustomIntervalForIndex(index As Integer) As Interval
+        If SlotSettings IsNot Nothing AndAlso index >= 0 AndAlso index < SlotSettings.Length AndAlso SlotSettings(index).HasCustomInterval Then
+            Return SlotSettings(index).CustomInterval
+        End If
+        Return Interval.Unset
+    End Function
+
+    Private Function SnapDisplayValuesForIndex(index As Integer) As List(Of Double)
+        If SlotSettings IsNot Nothing AndAlso index >= 0 AndAlso index < SlotSettings.Length AndAlso SlotSettings(index).SnapDisplayValues IsNot Nothing Then
+            Return SlotSettings(index).SnapDisplayValues
+        End If
+        Return SnapDisplayValues
+    End Function
+
+    Friend Function HasFixedSnapTickStepForIndex(index As Integer) As Boolean
+        If Not SnappingTicks Then Return False
+        If SlotSettings IsNot Nothing AndAlso index >= 0 AndAlso index < SlotSettings.Length AndAlso SlotSettings(index).HasSnapTickStep Then
+            Dim stepVal As Double = SlotSettings(index).SnapTickStep
+            Return stepVal > 0 AndAlso Not Double.IsNaN(stepVal) AndAlso Not Double.IsInfinity(stepVal)
+        End If
+        Return HasFixedSnapTickStep()
+    End Function
+
+    Private Function SnapTickStepForIndex(index As Integer) As Double
+        If SlotSettings IsNot Nothing AndAlso index >= 0 AndAlso index < SlotSettings.Length AndAlso SlotSettings(index).HasSnapTickStep Then
+            Return SlotSettings(index).SnapTickStep
+        End If
+        Return SnapTickStep
+    End Function
+
+    ''' <summary>Custom domain from the D input this solve (Unset when absent/invalid) — legacy global; prefer per-index slot settings.</summary>
     Friend CustomInterval As Interval = Interval.Unset
 
-    ''' <summary>Snap values from the S input this solve (in display units).</summary>
+    ''' <summary>Snap values from the S input this solve (in display units) — legacy global fallback.</summary>
     Friend SnapDisplayValues As New List(Of Double)
 
     ''' <summary>Fixed tick step from the T input this solve (display units); 0 = use zoom-adaptive ruler.</summary>
     Friend SnapTickStep As Double = 0
 
-    Friend SliderMouse As CurveSliderMouse
-    Friend SliderTextBox As FormCurveSliderBox = Nothing
-    ''' <summary>Slot index currently being edited in the floating box (-1 = none).</summary>
-    Friend EditIndex As Integer = -1
-
     Friend Function HasValidCustomInterval() As Boolean
-        Return CustomDomain AndAlso CustomInterval.IsValid AndAlso Math.Abs(CustomInterval.Length) > Rhino.RhinoMath.ZeroTolerance
+        Return HasValidCustomIntervalForIndex(0)
     End Function
 
     ''' <summary>Display value at a normalized curve parameter (for tick labels), per current settings.</summary>
     Friend Function DisplayValueAtNormalized(index As Integer, tNorm As Double) As Double
         Dim t As Double = Math.Max(0.0R, Math.Min(1.0R, tNorm))
-        If HasValidCustomInterval() Then Return CustomInterval.ParameterAt(t)
-        If ShowRealValue AndAlso index < Curves.Count AndAlso Curves(index) IsNot Nothing Then
+        If HasValidCustomIntervalForIndex(index) Then Return CustomIntervalForIndex(index).ParameterAt(t)
+        If ShowRealValueForIndex(index) AndAlso index < Curves.Count AndAlso Curves(index) IsNot Nothing Then
             Return Curves(index).Domain.ParameterAt(t)
         End If
         Return t
@@ -363,8 +844,8 @@ Public Class CurveSliderComp
     ''' <summary>Normalized t → displayed/output value per current settings.</summary>
     Friend Function DisplayValue(index As Integer) As Double
         Dim t As Double = If(index < SliderParams.Count, SliderParams(index), 0.5R)
-        If HasValidCustomInterval() Then Return CustomInterval.ParameterAt(t)
-        If ShowRealValue AndAlso index < Curves.Count AndAlso Curves(index) IsNot Nothing Then
+        If HasValidCustomIntervalForIndex(index) Then Return CustomIntervalForIndex(index).ParameterAt(t)
+        If ShowRealValueForIndex(index) AndAlso index < Curves.Count AndAlso Curves(index) IsNot Nothing Then
             Return Curves(index).Domain.ParameterAt(t)
         End If
         Return t
@@ -372,9 +853,9 @@ Public Class CurveSliderComp
 
     ''' <summary>Displayed value → normalized t without clamping; False when the mapping is undefined.</summary>
     Friend Function TryNormalizedFromDisplayValueUnclamped(index As Integer, value As Double, ByRef t As Double) As Boolean
-        If HasValidCustomInterval() Then
-            t = CustomInterval.NormalizedParameterAt(value)
-        ElseIf ShowRealValue AndAlso index < Curves.Count AndAlso Curves(index) IsNot Nothing Then
+        If HasValidCustomIntervalForIndex(index) Then
+            t = CustomIntervalForIndex(index).NormalizedParameterAt(value)
+        ElseIf ShowRealValueForIndex(index) AndAlso index < Curves.Count AndAlso Curves(index) IsNot Nothing Then
             t = Curves(index).Domain.NormalizedParameterAt(value)
         Else
             t = value
@@ -385,8 +866,10 @@ Public Class CurveSliderComp
     ''' <summary>Normalized snap parameters (0-1) for one curve, from the S input values in display units.</summary>
     Friend Function SnapParamsForCurve(index As Integer) As List(Of Double)
         Dim result As New List(Of Double)
-        If Not SnapValues OrElse SnapDisplayValues.Count = 0 Then Return result
-        For Each v As Double In SnapDisplayValues
+        If Not SnapValues Then Return result
+        Dim src As List(Of Double) = SnapDisplayValuesForIndex(index)
+        If src Is Nothing OrElse src.Count = 0 Then Return result
+        For Each v As Double In src
             Dim t As Double
             If Not TryNormalizedFromDisplayValueUnclamped(index, v, t) Then Continue For
             If t < -0.000001R OrElse t > 1.000001R Then Continue For
@@ -394,6 +877,20 @@ Public Class CurveSliderComp
         Next
         Return result
     End Function
+
+    ''' <summary>Starting normalized params from the Sp input this solve (parallel to Curves).</summary>
+    Friend StartingParams As New List(Of Double)
+
+    Friend SliderMouse As CurveSliderMouse
+    Friend SliderTextBox As FormCurveSliderBox = Nothing
+    ''' <summary>Slot index currently being edited in the floating box (-1 = none).</summary>
+    Friend EditIndex As Integer = -1
+
+    ''' <summary>Previous Cc input value for rising-edge clear-cache detection.</summary>
+    Private _clearCacheInputPrev As Boolean = False
+
+    ''' <summary>Minimum on-screen curve length before ruler ticks and numeric labels are drawn.</summary>
+    Private Const RulerMinCurveScreenLengthPx As Double = 28.0R
 
     ''' <summary>Minimum on-screen spacing between ruler tick marks (pixels).</summary>
     Private Const RulerMinTickSpacingPx As Double = 10.0R
@@ -499,8 +996,8 @@ Public Class CurveSliderComp
         Return vSpan / pxDist * RulerMinTickSpacingPx
     End Function
 
-    ''' <summary>On-screen curve length using only viewport-near samples (off-screen points are ignored).</summary>
-    Private Shared Function EstimateVisibleCurveScreenLength(crv As Curve, vp As RhinoViewport) As Double
+    ''' <summary>On-screen curve length from viewport samples; uses min(sampled, arc estimate) so zoom-out is not overestimated.</summary>
+    Private Shared Function MeasureCurveScreenLengthPx(crv As Curve, vp As RhinoViewport) As Double
         If crv Is Nothing OrElse vp Is Nothing Then Return 0
 
         Const samples As Integer = 48
@@ -533,19 +1030,47 @@ Public Class CurveSliderComp
             hasPrev = True
         Next
 
-        ' Fallback when the curve is mostly off-screen: arc length × local px/unit at midpoint.
-        If screenLen < 60.0R Then
+        Dim arcEstimate As Double = 0
+        Try
             Dim mid As Point3d = crv.PointAt(crv.Domain.Mid)
             Dim pxPerUnit As Double = 0
             vp.GetWorldToScreenScale(mid, pxPerUnit)
             If pxPerUnit > 0 Then
                 Dim arcLen As Double = crv.GetLength()
-                If arcLen > 0 Then screenLen = arcLen * pxPerUnit
+                If arcLen > 0 Then arcEstimate = arcLen * pxPerUnit
             End If
+        Catch
+        End Try
+
+        If screenLen <= 0 Then Return arcEstimate
+        If arcEstimate <= 0 Then Return screenLen
+        Return Math.Min(screenLen, arcEstimate)
+    End Function
+
+    Private Shared Function ShouldShowRulerAnnotations(crv As Curve, vp As RhinoViewport) As Boolean
+        Return MeasureCurveScreenLengthPx(crv, vp) >= RulerMinCurveScreenLengthPx
+    End Function
+
+    ''' <summary>On-screen curve length using only viewport-near samples (off-screen points are ignored).</summary>
+    Private Shared Function EstimateVisibleCurveScreenLength(crv As Curve, vp As RhinoViewport) As Double
+        Dim screenLen As Double = MeasureCurveScreenLengthPx(crv, vp)
+        If screenLen <= 0 Then Return 0
+
+        ' When partly on-screen, allow a modest boost for step sizing (not for show/hide).
+        If screenLen < 60.0R Then
+            Try
+                Dim mid As Point3d = crv.PointAt(crv.Domain.Mid)
+                Dim pxPerUnit As Double = 0
+                vp.GetWorldToScreenScale(mid, pxPerUnit)
+                If pxPerUnit > 0 Then
+                    Dim arcLen As Double = crv.GetLength()
+                    If arcLen > 0 Then screenLen = Math.Max(screenLen, arcLen * pxPerUnit)
+                End If
+            Catch
+            End Try
         End If
 
-        ' A curve cannot usefully appear longer than ~1.5× the viewport diagonal.
-        Dim cap As Double = diag * 1.5R
+        Dim cap As Double = ViewportDiagonalPx(vp) * 1.5R
         If screenLen > cap Then screenLen = cap
         Return screenLen
     End Function
@@ -601,6 +1126,7 @@ Public Class CurveSliderComp
         If vp Is Nothing OrElse index < 0 OrElse index >= Curves.Count Then Return False
         Dim crv As Curve = Curves(index)
         If crv Is Nothing Then Return False
+        If Not ShouldShowRulerAnnotations(crv, vp) Then Return False
 
         Dim tVisLo As Double, tVisHi As Double
         If Not TryVisibleNormalizedRange(crv, vp, tVisLo, tVisHi) Then Return False
@@ -620,7 +1146,7 @@ Public Class CurveSliderComp
         If rawStep <= 0 OrElse Double.IsNaN(rawStep) OrElse Double.IsInfinity(rawStep) Then
             ' Fallback when local scale is degenerate.
             Dim screenLen As Double = EstimateVisibleCurveScreenLength(crv, vp)
-            If screenLen < 20.0R Then Return False
+            If screenLen < RulerMinCurveScreenLengthPx Then Return False
             rawStep = visSpan * RulerMinTickSpacingPx / screenLen
         End If
         If rawStep <= 0 OrElse Double.IsNaN(rawStep) OrElse Double.IsInfinity(rawStep) Then Return False
@@ -651,8 +1177,8 @@ Public Class CurveSliderComp
         If Not SnappingTicks Then Return tNorm
 
         Dim stepVal As Double = 0
-        If HasFixedSnapTickStep() Then
-            stepVal = SnapTickStep
+        If HasFixedSnapTickStepForIndex(index) Then
+            stepVal = SnapTickStepForIndex(index)
         ElseIf view IsNot Nothing Then
             Dim majorEvery As Integer
             If Not TryComputeRulerStep(index, view.ActiveViewport, stepVal, majorEvery) Then Return tNorm
@@ -670,12 +1196,19 @@ Public Class CurveSliderComp
         Return Math.Max(0.0R, Math.Min(1.0R, t))
     End Function
 
+    Friend Function InitialSliderParam(index As Integer) As Double
+        If StartingParams IsNot Nothing AndAlso index >= 0 AndAlso index < StartingParams.Count Then
+            Return StartingParams(index)
+        End If
+        Return 0.5R
+    End Function
+
     ''' <summary>Displayed value → normalized t per current settings (clamped 0-1).</summary>
     Friend Function NormalizedFromDisplayValue(index As Integer, value As Double) As Double
         Dim t As Double
-        If HasValidCustomInterval() Then
-            t = CustomInterval.NormalizedParameterAt(value)
-        ElseIf ShowRealValue AndAlso index < Curves.Count AndAlso Curves(index) IsNot Nothing Then
+        If HasValidCustomIntervalForIndex(index) Then
+            t = CustomIntervalForIndex(index).NormalizedParameterAt(value)
+        ElseIf ShowRealValueForIndex(index) AndAlso index < Curves.Count AndAlso Curves(index) IsNot Nothing Then
             t = Curves(index).Domain.NormalizedParameterAt(value)
         Else
             t = value
@@ -686,15 +1219,16 @@ Public Class CurveSliderComp
 
     Friend Sub SetStateFromUndo(newParams As List(Of Double), newPreserve As Boolean, newProximity As Boolean,
                                 newReal As Boolean, newCustomDomain As Boolean, newSnapValues As Boolean, newSnappingTicks As Boolean,
-                                newLockUnselected As Boolean)
+                                newStartingPosition As Boolean, newLockUnselected As Boolean)
         SliderParams = New List(Of Double)(newParams)
         PreserveChanges = newPreserve
         ProximityCache = newProximity
         ShowRealValue = newReal
-        Dim needSync As Boolean = (CustomDomain <> newCustomDomain) OrElse (SnapValues <> newSnapValues) OrElse (SnappingTicks <> newSnappingTicks)
+        Dim needSync As Boolean = (CustomDomain <> newCustomDomain) OrElse (SnapValues <> newSnapValues) OrElse (SnappingTicks <> newSnappingTicks) OrElse (StartingPosition <> newStartingPosition)
         CustomDomain = newCustomDomain
         SnapValues = newSnapValues
         SnappingTicks = newSnappingTicks
+        StartingPosition = newStartingPosition
         LockUnselected = newLockUnselected
         If needSync Then SyncOptionalInputs()
         CloseSliderTextBoxIfAny()
@@ -731,7 +1265,7 @@ Public Class CurveSliderComp
         End Try
         Dim t As Double = NormalizedFromDisplayValue(index, v)
         While SliderParams.Count < Curves.Count
-            SliderParams.Add(0.5R)
+            SliderParams.Add(InitialSliderParam(SliderParams.Count))
         End While
         If Math.Abs(SliderParams(index) - t) < 0.0000000001R Then Return
         RecordUndoEvent("Curve Slider Value", New CurveSliderUndo(Me))
@@ -747,7 +1281,7 @@ Public Class CurveSliderComp
     Friend Sub DragSliderParam(index As Integer, t As Double)
         If index < 0 OrElse index >= Curves.Count Then Return
         While SliderParams.Count < Curves.Count
-            SliderParams.Add(0.5R)
+            SliderParams.Add(InitialSliderParam(SliderParams.Count))
         End While
         SliderParams(index) = Math.Max(0.0R, Math.Min(1.0R, t))
         Me.ExpireSolution(True)
@@ -760,7 +1294,7 @@ Public Class CurveSliderComp
 
     ''' <summary>Viewport interaction is live when unlocked, previewed, has curves, and selection rules allow it.</summary>
     Friend Sub SyncMouse()
-        Dim selectionOk As Boolean = Me.Attributes IsNot Nothing AndAlso (Not LockUnselected OrElse Me.Attributes.Selected)
+        Dim selectionOk As Boolean = IsSelectionAllowedForViewport()
         Dim want As Boolean =
             selectionOk AndAlso
             Not Me.Locked AndAlso
@@ -770,6 +1304,216 @@ Public Class CurveSliderComp
             If SliderMouse.Enabled <> want Then SliderMouse.Enabled = want
         End If
         If Not want Then CloseSliderTextBoxIfAny()
+    End Sub
+
+#End Region
+
+#Region "Per-curve slot settings (tree-matched optional inputs)"
+
+    Private Sub MapBoolTreeToCurveSlots(DA As IGH_DataAccess, nick As String, curveData As GH_Structure(Of GH_Curve),
+                                        defaultValue As Boolean, apply As Action(Of Integer, Boolean))
+        If SlotSettings Is Nothing Then Return
+        Dim ix As Integer = FindInputIndexByNick(nick)
+        If ix < 0 OrElse Params.Input(ix).SourceCount = 0 Then Return
+        Dim tree As New GH_Structure(Of GH_Boolean)
+        If Not DA.GetDataTree(ix, tree) Then Return
+
+        Dim broadcast As Boolean = defaultValue
+        Dim useBroadcast As Boolean = False
+        If tree.DataCount = 1 Then
+            useBroadcast = True
+            Dim gb As GH_Boolean = tree.AllData(True).FirstOrDefault()
+            If gb IsNot Nothing Then broadcast = gb.Value
+        End If
+
+        Dim flat As Integer = 0
+        For Each path As GH_Path In curveData.Paths
+            Dim curveBranch As IList(Of GH_Curve) = curveData.DataList(path)
+            Dim valueBranch As IList(Of GH_Boolean) = Nothing
+            If Not useBroadcast AndAlso tree.PathExists(path) Then valueBranch = tree.Branch(path)
+            For j As Integer = 0 To curveBranch.Count - 1
+                If flat < SlotSettings.Length Then
+                    Dim v As Boolean = defaultValue
+                    If useBroadcast Then
+                        v = broadcast
+                    ElseIf valueBranch IsNot Nothing AndAlso j < valueBranch.Count AndAlso valueBranch(j) IsNot Nothing Then
+                        v = valueBranch(j).Value
+                    End If
+                    apply(flat, v)
+                End If
+                flat += 1
+            Next
+        Next
+    End Sub
+
+    Private Sub MapIntervalTreeToCurveSlots(DA As IGH_DataAccess, nick As String, curveData As GH_Structure(Of GH_Curve),
+                                            apply As Action(Of Integer, Interval))
+        If SlotSettings Is Nothing Then Return
+        Dim ix As Integer = FindInputIndexByNick(nick)
+        If ix < 0 OrElse Params.Input(ix).SourceCount = 0 Then Return
+        Dim tree As New GH_Structure(Of GH_Interval)
+        If Not DA.GetDataTree(ix, tree) Then Return
+
+        Dim broadcast As Interval = Interval.Unset
+        Dim useBroadcast As Boolean = False
+        If tree.DataCount = 1 Then
+            useBroadcast = True
+            Dim gi As GH_Interval = tree.AllData(True).FirstOrDefault()
+            If gi IsNot Nothing Then broadcast = gi.Value
+        End If
+
+        Dim flat As Integer = 0
+        For Each path As GH_Path In curveData.Paths
+            Dim curveBranch As IList(Of GH_Curve) = curveData.DataList(path)
+            Dim valueBranch As IList(Of GH_Interval) = Nothing
+            If Not useBroadcast AndAlso tree.PathExists(path) Then valueBranch = tree.Branch(path)
+            For j As Integer = 0 To curveBranch.Count - 1
+                If flat < SlotSettings.Length Then
+                    Dim iv As Interval = Interval.Unset
+                    If useBroadcast Then
+                        iv = broadcast
+                    ElseIf valueBranch IsNot Nothing AndAlso j < valueBranch.Count AndAlso valueBranch(j) IsNot Nothing Then
+                        iv = valueBranch(j).Value
+                    End If
+                    If iv.IsValid Then apply(flat, iv)
+                End If
+                flat += 1
+            Next
+        Next
+    End Sub
+
+    Private Sub MapNumberTreeToCurveSlots(DA As IGH_DataAccess, nick As String, curveData As GH_Structure(Of GH_Curve),
+                                          apply As Action(Of Integer, Double))
+        If SlotSettings Is Nothing Then Return
+        Dim ix As Integer = FindInputIndexByNick(nick)
+        If ix < 0 OrElse Params.Input(ix).SourceCount = 0 Then Return
+        Dim tree As New GH_Structure(Of GH_Number)
+        If Not DA.GetDataTree(ix, tree) Then Return
+
+        Dim broadcast As Double = 0
+        Dim useBroadcast As Boolean = False
+        If tree.DataCount = 1 Then
+            useBroadcast = True
+            Dim gn As GH_Number = tree.AllData(True).FirstOrDefault()
+            If gn IsNot Nothing AndAlso gn.IsValid Then broadcast = gn.Value
+        End If
+
+        Dim flat As Integer = 0
+        For Each path As GH_Path In curveData.Paths
+            Dim curveBranch As IList(Of GH_Curve) = curveData.DataList(path)
+            Dim valueBranch As IList(Of GH_Number) = Nothing
+            If Not useBroadcast AndAlso tree.PathExists(path) Then valueBranch = tree.Branch(path)
+            For j As Integer = 0 To curveBranch.Count - 1
+                If flat < SlotSettings.Length Then
+                    Dim v As Double = 0
+                    Dim hasV As Boolean = False
+                    If useBroadcast Then
+                        v = broadcast
+                        hasV = True
+                    ElseIf valueBranch IsNot Nothing AndAlso j < valueBranch.Count AndAlso valueBranch(j) IsNot Nothing AndAlso valueBranch(j).IsValid Then
+                        v = valueBranch(j).Value
+                        hasV = True
+                    End If
+                    If hasV Then apply(flat, v)
+                End If
+                flat += 1
+            Next
+        Next
+    End Sub
+
+    Private Sub MapSnapValuesTreeToCurveSlots(DA As IGH_DataAccess, curveData As GH_Structure(Of GH_Curve))
+        If SlotSettings Is Nothing Then Return
+        Dim ix As Integer = FindSnapInputIndex()
+        If ix < 0 OrElse Params.Input(ix).SourceCount = 0 Then Return
+        Dim tree As New GH_Structure(Of GH_Number)
+        If Not DA.GetDataTree(ix, tree) Then Return
+
+        Dim broadcastVals As New List(Of Double)
+        Dim useBroadcast As Boolean = False
+        If tree.DataCount = 1 Then
+            useBroadcast = True
+            Dim gn As GH_Number = tree.AllData(True).FirstOrDefault()
+            If gn IsNot Nothing AndAlso gn.IsValid AndAlso Not Double.IsNaN(gn.Value) AndAlso Not Double.IsInfinity(gn.Value) Then
+                broadcastVals.Add(gn.Value)
+            End If
+        End If
+
+        Dim pathSnaps As New Dictionary(Of GH_Path, List(Of Double))
+        If Not useBroadcast Then
+            For Each path As GH_Path In tree.Paths
+                Dim vals As New List(Of Double)
+                For Each gn As GH_Number In tree.Branch(path)
+                    If gn IsNot Nothing AndAlso gn.IsValid AndAlso Not Double.IsNaN(gn.Value) AndAlso Not Double.IsInfinity(gn.Value) Then
+                        vals.Add(gn.Value)
+                    End If
+                Next
+                If vals.Count > 0 Then pathSnaps(path) = vals
+            Next
+        End If
+
+        Dim flat As Integer = 0
+        For Each path As GH_Path In curveData.Paths
+            Dim curveBranch As IList(Of GH_Curve) = curveData.DataList(path)
+            Dim vals As List(Of Double) = Nothing
+            If useBroadcast Then
+                vals = broadcastVals
+            ElseIf pathSnaps.ContainsKey(path) Then
+                vals = pathSnaps(path)
+            End If
+            For j As Integer = 0 To curveBranch.Count - 1
+                If flat < SlotSettings.Length AndAlso vals IsNot Nothing AndAlso vals.Count > 0 Then
+                    SlotSettings(flat).SnapDisplayValues = New List(Of Double)(vals)
+                End If
+                flat += 1
+            Next
+        Next
+    End Sub
+
+    Private Sub BuildSlotSettings(DA As IGH_DataAccess, curveData As GH_Structure(Of GH_Curve))
+        Dim n As Integer = Curves.Count
+        If n <= 0 Then
+            SlotSettings = Nothing
+            Return
+        End If
+
+        ReDim SlotSettings(n - 1)
+        For i As Integer = 0 To n - 1
+            Dim s As CurveSliderSlotSettings
+            s.Active = True
+            s.ShowRealValue = ShowRealValue
+            s.CustomInterval = Interval.Unset
+            s.HasCustomInterval = False
+            s.SnapDisplayValues = New List(Of Double)
+            s.SnapTickStep = 0
+            s.HasSnapTickStep = False
+            SlotSettings(i) = s
+        Next
+
+        If HasZuiInput(ZuiOptionalKind.Active) Then
+            MapBoolTreeToCurveSlots(DA, "Ac", curveData, True, Sub(i, v) SlotSettings(i).Active = v)
+        End If
+        If HasZuiInput(ZuiOptionalKind.RealValues) Then
+            MapBoolTreeToCurveSlots(DA, "Rv", curveData, ShowRealValue, Sub(i, v) SlotSettings(i).ShowRealValue = v)
+        End If
+        If HasZuiInput(ZuiOptionalKind.CustomDomain) Then
+            MapIntervalTreeToCurveSlots(DA, "D", curveData,
+                Sub(i, iv)
+                    SlotSettings(i).CustomInterval = iv
+                    SlotSettings(i).HasCustomInterval = iv.IsValid AndAlso Math.Abs(iv.Length) > Rhino.RhinoMath.ZeroTolerance
+                End Sub)
+        End If
+        If HasZuiInput(ZuiOptionalKind.SnapValues) Then
+            MapSnapValuesTreeToCurveSlots(DA, curveData)
+        End If
+        If HasZuiInput(ZuiOptionalKind.SnappingTicks) Then
+            MapNumberTreeToCurveSlots(DA, "T", curveData,
+                Sub(i, v)
+                    If v > 0 AndAlso Not Double.IsNaN(v) AndAlso Not Double.IsInfinity(v) Then
+                        SlotSettings(i).SnapTickStep = v
+                        SlotSettings(i).HasSnapTickStep = True
+                    End If
+                End Sub)
+        End If
     End Sub
 
 #End Region
@@ -805,11 +1549,69 @@ Public Class CurveSliderComp
         Return crv.PointAt(crv.Domain.ParameterAt(Math.Max(0.0R, Math.Min(1.0R, t))))
     End Function
 
-    ''' <summary>Greedy nearest matching: each old slider point claims the closest new curve; its param becomes the projection of the old point onto that curve.</summary>
-    Private Shared Function RemapParamsByProximity(oldCurves As List(Of Curve), oldParams As List(Of Double), newCurves As List(Of Curve)) As List(Of Double)
-        Dim result As New List(Of Double)(newCurves.Count)
+    Private Shared Function ClampNormalizedParam(v As Double) As Double
+        If Double.IsNaN(v) OrElse Double.IsInfinity(v) Then Return 0.5R
+        Return Math.Max(0.0R, Math.Min(1.0R, v))
+    End Function
+
+    ''' <summary>Convert a Sp input value into normalized slider storage per current display settings.</summary>
+    Private Function StartingInputToNormalized(index As Integer, crv As Curve, value As Double) As Double
+        If HasValidCustomIntervalForIndex(index) Then
+            Return ClampNormalizedParam(CustomIntervalForIndex(index).NormalizedParameterAt(value))
+        ElseIf ShowRealValueForIndex(index) AndAlso crv IsNot Nothing Then
+            Return ClampNormalizedParam(crv.Domain.NormalizedParameterAt(value))
+        Else
+            Return ClampNormalizedParam(value)
+        End If
+    End Function
+
+    Private Sub BuildStartingParamsFromTree(curveData As GH_Structure(Of GH_Curve), startData As GH_Structure(Of GH_Number),
+                                          newCurves As List(Of Curve), result As List(Of Double))
+        result.Clear()
         For i As Integer = 0 To newCurves.Count - 1
             result.Add(0.5R)
+        Next
+        If startData Is Nothing OrElse startData.DataCount = 0 Then Return
+
+        Dim broadcast As Double = 0.5R
+        Dim broadcastSet As Boolean = False
+        If startData.DataCount = 1 Then
+            Dim gn As GH_Number = startData.AllData(True).FirstOrDefault()
+            If gn IsNot Nothing Then
+                broadcast = gn.Value
+                broadcastSet = True
+            End If
+        End If
+
+        Dim flat As Integer = 0
+        For Each path As GH_Path In curveData.Paths
+            Dim curveBranch As IList(Of GH_Curve) = curveData.DataList(path)
+            Dim startBranch As IList(Of GH_Number) = Nothing
+            If startData.PathExists(path) Then startBranch = startData.DataList(path)
+            For j As Integer = 0 To curveBranch.Count - 1
+                If flat < result.Count Then
+                    Dim crv As Curve = If(flat < newCurves.Count, newCurves(flat), Nothing)
+                    Dim t As Double = 0.5R
+                    If startBranch IsNot Nothing AndAlso j < startBranch.Count AndAlso startBranch(j) IsNot Nothing Then
+                        t = StartingInputToNormalized(flat, crv, startBranch(j).Value)
+                    ElseIf broadcastSet Then
+                        t = StartingInputToNormalized(flat, crv, broadcast)
+                    End If
+                    result(flat) = t
+                End If
+                flat += 1
+            Next
+        Next
+    End Sub
+
+    ''' <summary>Greedy nearest matching: each old slider point claims the closest new curve; its param becomes the projection of the old point onto that curve.</summary>
+    Private Shared Function RemapParamsByProximity(oldCurves As List(Of Curve), oldParams As List(Of Double), newCurves As List(Of Curve),
+                                                   startingParams As List(Of Double)) As List(Of Double)
+        Dim result As New List(Of Double)(newCurves.Count)
+        For i As Integer = 0 To newCurves.Count - 1
+            Dim t0 As Double = 0.5R
+            If startingParams IsNot Nothing AndAlso i < startingParams.Count Then t0 = startingParams(i)
+            result.Add(t0)
         Next
 
         Dim nOld As Integer = Math.Min(oldCurves.Count, oldParams.Count)
@@ -867,6 +1669,29 @@ Public Class CurveSliderComp
         Next
         DA.SetDataTree(0, outPts)
         DA.SetDataTree(1, outVals)
+
+        Dim uIx As Integer = FindOutputIndexByNick("u")
+        If uIx >= 0 Then
+            Dim outU As New GH_Structure(Of GH_Number)
+            For i As Integer = 0 To Curves.Count - 1
+                Dim path As GH_Path = If(i < CurvePaths.Count, CurvePaths(i), New GH_Path(0))
+                Dim u As Double = If(i < SliderParams.Count, SliderParams(i), 0.5R)
+                outU.Append(New GH_Number(u), path)
+            Next
+            DA.SetDataTree(uIx, outU)
+        End If
+
+        Dim domIx As Integer = FindOutputIndexByNick("Dom")
+        If domIx >= 0 Then
+            Dim outDom As New GH_Structure(Of GH_Interval)
+            For i As Integer = 0 To Curves.Count - 1
+                Dim path As GH_Path = If(i < CurvePaths.Count, CurvePaths(i), New GH_Path(0))
+                Dim dom As Interval = Interval.Unset
+                If i < Curves.Count AndAlso Curves(i) IsNot Nothing Then dom = Curves(i).Domain
+                outDom.Append(New GH_Interval(dom), path)
+            Next
+            DA.SetDataTree(domIx, outDom)
+        End If
     End Sub
 
     Protected Overrides Sub SolveInstance(DA As IGH_DataAccess)
@@ -881,64 +1706,54 @@ Public Class CurveSliderComp
         End If
 
         CustomInterval = Interval.Unset
-        If CustomDomain Then
-            Dim dIx As Integer = FindDomainInputIndex()
-            If dIx >= 0 AndAlso Me.Params.Input(dIx).VolatileDataCount > 0 Then
-                Dim iv As Interval = Interval.Unset
-                If DA.GetData(dIx, iv) AndAlso iv.IsValid Then CustomInterval = iv
-            End If
-        End If
-
         SnapDisplayValues.Clear()
-        If SnapValues Then
-            Dim sIx As Integer = FindSnapInputIndex()
-            If sIx >= 0 AndAlso Me.Params.Input(sIx).VolatileDataCount > 0 Then
-                Dim vals As New List(Of Double)
-                If DA.GetDataList(sIx, vals) Then
-                    For Each v As Double In vals
-                        If Not Double.IsNaN(v) AndAlso Not Double.IsInfinity(v) Then SnapDisplayValues.Add(v)
-                    Next
-                End If
-            End If
-        End If
-
         SnapTickStep = 0
-        If SnappingTicks Then
-            Dim tIx As Integer = FindTickStepInputIndex()
-            If tIx >= 0 AndAlso Me.Params.Input(tIx).VolatileDataCount > 0 Then
-                Dim stepIn As Double
-                If DA.GetData(tIx, stepIn) AndAlso stepIn > 0 AndAlso Not Double.IsNaN(stepIn) AndAlso Not Double.IsInfinity(stepIn) Then
-                    SnapTickStep = stepIn
-                End If
-            End If
-        End If
+
+        SyncFeatureFlagsFromInputs()
+        ApplyZuiBooleanInputs(DA)
+        ApplyRealValuesFromInput(DA)
 
         Dim newCurves As New List(Of Curve)
         Dim newPaths As New List(Of GH_Path)
         BuildCurvesFromTree(curveData, newCurves, newPaths)
 
+        Curves = newCurves
+        CurvePaths = newPaths
+        BuildSlotSettings(DA, curveData)
+
+        StartingParams.Clear()
+        If StartingPosition Then
+            Dim spIx As Integer = FindStartingPositionInputIndex()
+            If spIx >= 0 AndAlso Me.Params.Input(spIx).SourceCount > 0 Then
+                Dim startData As New GH_Structure(Of GH_Number)
+                If DA.GetDataTree(spIx, startData) Then
+                    BuildStartingParamsFromTree(curveData, startData, Curves, StartingParams)
+                End If
+            End If
+        End If
+        While StartingParams.Count < Curves.Count
+            StartingParams.Add(0.5R)
+        End While
+
         If CacheCurves Is Nothing Then
             CacheCurves = newCurves
         ElseIf Not CurvesEqual(CacheCurves, newCurves) Then
             If ProximityCache Then
-                SliderParams = RemapParamsByProximity(CacheCurves, SliderParams, newCurves)
+                SliderParams = RemapParamsByProximity(CacheCurves, SliderParams, newCurves, StartingParams)
             ElseIf Not PreserveChanges Then
                 SliderParams.Clear()
             End If
             CacheCurves = newCurves
         End If
 
-        Curves = newCurves
-        CurvePaths = newPaths
-
         While SliderParams.Count < Curves.Count
-            SliderParams.Add(0.5R)
+            SliderParams.Add(InitialSliderParam(SliderParams.Count))
         End While
         If Not PreserveChanges AndAlso SliderParams.Count > Curves.Count Then
             SliderParams.RemoveRange(Curves.Count, SliderParams.Count - Curves.Count)
         End If
 
-        If EditIndex >= Curves.Count Then CloseSliderTextBoxIfAny()
+        If EditIndex >= Curves.Count OrElse (EditIndex >= 0 AndAlso Not IsCurveActiveForViewport(EditIndex)) Then CloseSliderTextBoxIfAny()
 
         Points.Clear()
         For i As Integer = 0 To Curves.Count - 1
@@ -946,6 +1761,7 @@ Public Class CurveSliderComp
         Next
 
         SetOutputTrees(DA)
+        SyncMouse()
     End Sub
 
 #End Region
@@ -1082,10 +1898,10 @@ Public Class CurveSliderComp
     Private Function TryGetViewportLabelStep(index As Integer, vp As RhinoViewport, ByRef minorStep As Double, ByRef majorLabelStep As Double) As Boolean
         minorStep = 0
         majorLabelStep = 0
-        If HasFixedSnapTickStep() Then
-            minorStep = SnapTickStep
+        If HasFixedSnapTickStepForIndex(index) Then
+            minorStep = SnapTickStepForIndex(index)
             Dim majorEvery As Integer
-            ApplyRulerMajorEvery(SnapTickStep, minorStep, majorEvery)
+            ApplyRulerMajorEvery(minorStep, minorStep, majorEvery)
             majorLabelStep = minorStep * majorEvery
             Return True
         End If
@@ -1134,11 +1950,13 @@ Public Class CurveSliderComp
     ''' <summary>Equal-division ruler ticks that densify as the view zooms in; labels on major ticks when selected.</summary>
     Private Sub DrawRulerTicks(args As IGH_PreviewArgs, index As Integer, crv As Curve, col As Color, selected As Boolean,
                                placedLabels As List(Of Rhino.Geometry.Point2d))
+        If Not ShouldShowRulerAnnotations(crv, args.Viewport) Then Return
+
         Dim stepVal As Double
         Dim majorEvery As Integer
-        If HasFixedSnapTickStep() Then
-            stepVal = SnapTickStep
-            ApplyRulerMajorEvery(SnapTickStep, stepVal, majorEvery)
+        If HasFixedSnapTickStepForIndex(index) Then
+            stepVal = SnapTickStepForIndex(index)
+            ApplyRulerMajorEvery(stepVal, stepVal, majorEvery)
         ElseIf Not TryComputeRulerStep(index, args.Viewport, stepVal, majorEvery) Then
             Return
         End If
@@ -1197,50 +2015,58 @@ Public Class CurveSliderComp
         Dim col As Color = If(selected, args.WireColour_Selected, args.WireColour)
 
         For i As Integer = 0 To Curves.Count - 1
+            If Not IsCurveActiveForViewport(i) Then Continue For
             Dim crv As Curve = Curves(i)
             If crv Is Nothing Then Continue For
 
+            Dim showRuler As Boolean = ShouldShowRulerAnnotations(crv, args.Viewport)
             Dim placedLabels As New List(Of Rhino.Geometry.Point2d)
             Dim stepVal As Double = 0
             Dim majorEvery As Integer = 10
-            TryComputeRulerStep(i, args.Viewport, stepVal, majorEvery)
+            If showRuler Then TryComputeRulerStep(i, args.Viewport, stepVal, majorEvery)
             Dim labelStep As Double = stepVal * majorEvery
 
             Dim startLabel As String = Nothing
-            If selected AndAlso ShouldDrawRulerLabel(args, crv, i, 0.0R, stepVal, labelStep) Then
+            If showRuler AndAlso selected AndAlso ShouldDrawRulerLabel(args, crv, i, 0.0R, stepVal, labelStep) Then
                 startLabel = FormatViewportValue(i, args.Viewport, DisplayValueAtNormalized(i, 0.0R))
             End If
-            DrawCurveTick(args, crv, 0.0R, CurveTickKind.EndCap, col, startLabel, placedLabels)
+            If showRuler Then DrawCurveTick(args, crv, 0.0R, CurveTickKind.EndCap, col, startLabel, placedLabels)
 
             Dim endLabel As String = Nothing
-            If selected AndAlso ShouldDrawRulerLabel(args, crv, i, 1.0R, stepVal, labelStep) Then
+            If showRuler AndAlso selected AndAlso ShouldDrawRulerLabel(args, crv, i, 1.0R, stepVal, labelStep) Then
                 endLabel = FormatViewportValue(i, args.Viewport, DisplayValueAtNormalized(i, 1.0R))
             End If
-            DrawCurveTick(args, crv, 1.0R, CurveTickKind.EndCap, col, endLabel, placedLabels)
+            If showRuler Then DrawCurveTick(args, crv, 1.0R, CurveTickKind.EndCap, col, endLabel, placedLabels)
 
-            DrawRulerTicks(args, i, crv, col, selected, placedLabels)
+            If showRuler Then DrawRulerTicks(args, i, crv, col, selected, placedLabels)
 
-            For Each ts As Double In SnapParamsForCurve(i)
-                Dim snapLbl As String = If(selected, FormatViewportValue(i, args.Viewport, DisplayValueAtNormalized(i, ts)), Nothing)
-                DrawCurveTick(args, crv, ts, CurveTickKind.SnapValue, col, snapLbl, placedLabels)
-            Next
+            If showRuler Then
+                For Each ts As Double In SnapParamsForCurve(i)
+                    Dim snapLbl As String = If(selected, FormatViewportValue(i, args.Viewport, DisplayValueAtNormalized(i, ts)), Nothing)
+                    DrawCurveTick(args, crv, ts, CurveTickKind.SnapValue, col, snapLbl, placedLabels)
+                Next
+            End If
 
             Dim pt As Point3d = If(i < Points.Count, Points(i), Point3d.Unset)
             If Not pt.IsValid Then Continue For
 
             args.Display.DrawPoint(pt, PointStyle.RoundControlPoint, 5, col)
 
-            Dim v As Double = DisplayValue(i)
-            Dim label As String = FormatViewportValue(i, args.Viewport, v)
-            Dim screenPt As Rhino.Geometry.Point2d = args.Viewport.WorldToClient(pt)
-            args.Display.Draw2dText(label, col, New Rhino.Geometry.Point2d(screenPt.X, screenPt.Y - 14.0R), True, 14)
+            If showRuler Then
+                Dim v As Double = DisplayValue(i)
+                Dim label As String = FormatViewportValue(i, args.Viewport, v)
+                Dim screenPt As Rhino.Geometry.Point2d = args.Viewport.WorldToClient(pt)
+                args.Display.Draw2dText(label, col, New Rhino.Geometry.Point2d(screenPt.X, screenPt.Y - 14.0R), True, 14)
+            End If
         Next
     End Sub
 
     Public Overrides ReadOnly Property ClippingBox As BoundingBox
         Get
             Dim bb As BoundingBox = BoundingBox.Empty
-            For Each p As Point3d In Points
+            For i As Integer = 0 To Points.Count - 1
+                If Not IsCurveActiveForViewport(i) Then Continue For
+                Dim p As Point3d = Points(i)
                 If p.IsValid Then bb.Union(p)
             Next
             If bb.IsValid Then bb.Inflate(1.0R)
@@ -1259,6 +2085,7 @@ Public Class CurveSliderComp
         writer.SetBoolean("CS_CustomDomain", CustomDomain)
         writer.SetBoolean("CS_Snap", SnapValues)
         writer.SetBoolean("CS_SnapTicks", SnappingTicks)
+        writer.SetBoolean("CS_StartingPosition", StartingPosition)
         writer.SetBoolean("CS_LockUnselected", LockUnselected)
         writer.SetInt32("CS_Count", SliderParams.Count)
         For i As Integer = 0 To SliderParams.Count - 1
@@ -1292,12 +2119,17 @@ Public Class CurveSliderComp
         reader.TryGetBoolean("CS_SnapTicks", snapTicks)
         SnappingTicks = snapTicks
 
+        Dim startingPos As Boolean = False
+        reader.TryGetBoolean("CS_StartingPosition", startingPos)
+        StartingPosition = startingPos
+
         Dim lockUnsel As Boolean = True
         reader.TryGetBoolean("CS_LockUnselected", lockUnsel)
         LockUnselected = lockUnsel
 
-        ' Register the optional D/S inputs before MyBase.Read so archived param data/sources map onto them.
+        ' Register optional inputs before MyBase.Read so archived param data/sources map onto them.
         SyncOptionalInputs()
+        VariableParameterMaintenance()
 
         SliderParams.Clear()
         Dim n As Integer = 0
@@ -1349,6 +2181,7 @@ Public Class CurveSliderUndo
     Private _customDomain As Boolean
     Private _snapValues As Boolean
     Private _snappingTicks As Boolean
+    Private _startingPosition As Boolean
     Private _lockUnselected As Boolean
 
     Sub New(owner As CurveSliderComp)
@@ -1360,6 +2193,7 @@ Public Class CurveSliderUndo
         _customDomain = owner.CustomDomain
         _snapValues = owner.SnapValues
         _snappingTicks = owner.SnappingTicks
+        _startingPosition = owner.StartingPosition
         _lockUnselected = owner.LockUnselected
     End Sub
 
@@ -1381,8 +2215,9 @@ Public Class CurveSliderUndo
         Dim curCustom As Boolean = comp.CustomDomain
         Dim curSnap As Boolean = comp.SnapValues
         Dim curSnapTicks As Boolean = comp.SnappingTicks
+        Dim curStarting As Boolean = comp.StartingPosition
         Dim curLockUnselected As Boolean = comp.LockUnselected
-        comp.SetStateFromUndo(_params, _preserve, _proximity, _real, _customDomain, _snapValues, _snappingTicks, _lockUnselected)
+        comp.SetStateFromUndo(_params, _preserve, _proximity, _real, _customDomain, _snapValues, _snappingTicks, _startingPosition, _lockUnselected)
         _params = curParams
         _preserve = curPreserve
         _proximity = curProximity
@@ -1390,6 +2225,7 @@ Public Class CurveSliderUndo
         _customDomain = curCustom
         _snapValues = curSnap
         _snappingTicks = curSnapTicks
+        _startingPosition = curStarting
         _lockUnselected = curLockUnselected
     End Sub
 
@@ -1433,6 +2269,7 @@ Public Class CurveSliderMouse
         Dim hit As Integer = -1
         Dim bestDist As Double = Double.PositiveInfinity
         For i As Integer = 0 To Comp.Points.Count - 1
+            If Not Comp.IsCurveActiveForViewport(i) Then Continue For
             Dim wpt As Point3d = Comp.Points(i)
             If Not wpt.IsValid Then Continue For
             If Not vp.IsVisible(wpt) Then Continue For
@@ -1571,10 +2408,17 @@ Public Class FormCurveSliderBox
     Private Shared _activeInstance As FormCurveSliderBox
 
     ''' <summary>Rhino MouseCallback route: dismiss when the viewport is pressed while this float has focus.</summary>
-    Friend Shared Sub RequestDismissFromBackdropMouse()
+    Friend Shared Function ConsumeBackdropMouseDown() As Boolean
         Dim f As FormCurveSliderBox = _activeInstance
-        If f Is Nothing OrElse f.IsDisposed Then Return
+        If f Is Nothing OrElse f.IsDisposed OrElse Not f.Visible Then Return False
+        If f._committing OrElse Not f._outsideDismissReady Then Return False
+        If Environment.TickCount < f._suppressBackdropDismissUntil Then Return False
         f.TryDismissFromOutsideRhinoGesture()
+        Return True
+    End Function
+
+    Friend Shared Sub RequestDismissFromBackdropMouse()
+        ConsumeBackdropMouseDown()
     End Sub
 
     Private Comp As CurveSliderComp
