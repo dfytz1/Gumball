@@ -463,7 +463,7 @@ Public Class GumballComp
         If MyGumball Is Nothing OrElse gripIndex < 0 OrElse gripIndex >= MyGumball.Count Then
             Return New Integer() {}
         End If
-        If ModeValueType = 1 Then
+        If ModeValueType = 1 OrElse _aaAppliesToWholeTree Then
             Dim all(MyGumball.Count - 1) As Integer
             For i As Integer = 0 To MyGumball.Count - 1
                 all(i) = i
@@ -518,7 +518,7 @@ Public Class GumballComp
                     GH_ParamAccess.tree)
             Case ZuiOptionalKind.ApplyToAll
                 Return CreateBoolZuiParam("Apply to all", "Aa",
-                    "When true for an item, dragging that gumball transforms all geometry on the same input branch equally (tree matches G; one value per branch applies to the whole branch).",
+                    "When true, dragging that gumball transforms grouped geometry equally. One boolean for the whole tree affects every item; one boolean per branch affects only that branch (tree matches G).",
                     GH_ParamAccess.tree)
             Case ZuiOptionalKind.DisplayMode
                 Return New Grasshopper.Kernel.Parameters.Param_Integer With {
@@ -764,6 +764,14 @@ Public Class GumballComp
         Next
     End Sub
 
+    Private Function DetectWholeTreeBoolBroadcast(DA As IGH_DataAccess, nick As String) As Boolean
+        Dim ix As Integer = FindInputIndexByNickName(nick)
+        If ix < 0 OrElse Params.Input(ix).SourceCount = 0 Then Return False
+        Dim tree As New GH_Structure(Of GH_Boolean)
+        If Not DA.GetDataTree(ix, tree) Then Return False
+        Return tree.DataCount = 1
+    End Function
+
     Private Sub MapBoolTreeToSlots(DA As IGH_DataAccess, nick As String, geom As DataTree(Of GeometryBase),
                                    defaultValue As Boolean, apply As Action(Of Integer, Boolean))
         If SlotSettings Is Nothing OrElse _leafToGumballSlot Is Nothing Then Return
@@ -876,6 +884,7 @@ Public Class GumballComp
         If n <= 0 Then
             SlotSettings = Nothing
             _slotPaths = Nothing
+            _aaAppliesToWholeTree = False
             Return
         End If
         ReDim SlotSettings(n - 1)
@@ -886,6 +895,7 @@ Public Class GumballComp
         Next
 
         MapBoolTreeToSlots(DA, "Ac", geom, True, Sub(slot, v) SlotSettings(slot).Active = v)
+        _aaAppliesToWholeTree = DetectWholeTreeBoolBroadcast(DA, "Aa")
         MapBoolTreeToSlots(DA, "Aa", geom, ModeValueType = 1, Sub(slot, v) SlotSettings(slot).ApplyToAll = v)
         If FindInputIndexByNickName("Dm") >= 0 Then
             MapIntTreeToSlots(DA, "Dm", geom, ModeValueAtt, Sub(slot, v) SlotSettings(slot).DisplayMode = v)
@@ -1118,6 +1128,8 @@ Public Class GumballComp
     Private _leafToGumballSlot As Integer()
     ''' <summary>Input tree path per gumball slot (parallel to MyGumball geometry indices).</summary>
     Private _slotPaths As GH_Path()
+    ''' <summary>True when wired Aa is a single boolean broadcast to the whole geometry tree.</summary>
+    Private _aaAppliesToWholeTree As Boolean = False
     ''' <summary>Maximum snap distance while translating (model units); NaN = automatic from document tolerance.</summary>
     Public SnapTranslateTolerance As Double = Double.NaN
 
