@@ -67,6 +67,7 @@ Public Class ButtonToggleComp
         SaveShifted = 18
         ClearCache = 19
         WorkWhenHidden = 20
+        ClickWhenHovered = 21
     End Enum
 
     Private Shared ReadOnly ZuiCanonicalOrder As ZuiOptionalKind() = {
@@ -87,6 +88,7 @@ Public Class ButtonToggleComp
         ZuiOptionalKind.Active,
         ZuiOptionalKind.LockUnselected,
         ZuiOptionalKind.WorkWhenHidden,
+        ZuiOptionalKind.ClickWhenHovered,
         ZuiOptionalKind.PreserveChanges,
         ZuiOptionalKind.ProximityCache,
         ZuiOptionalKind.ClearCache
@@ -246,6 +248,9 @@ Public Class ButtonToggleComp
         Dim workHidden As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Work when hidden", AddressOf Menu_WorkWhenHidden, True, MenuBoolChecked(WorkWhenHidden, ZuiOptionalKind.WorkWhenHidden))
         workHidden.ToolTipText = "When on, viewport clicking still works while this component is Hidden (preview off)."
 
+        Dim clickHover As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Click when hovered", AddressOf Menu_ClickWhenHovered, True, MenuBoolChecked(ClickWhenHovered, ZuiOptionalKind.ClickWhenHovered))
+        clickHover.ToolTipText = "When on, hovering a control activates it once (toggle or button). Leave and re-enter to activate again — no mouse click required."
+
         Dim listCache As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "List cache", AddressOf Menu_PreserveChanges, True, MenuBoolChecked(PreserveChanges, ZuiOptionalKind.PreserveChanges))
         listCache.ToolTipText = "Keep toggle state by tree path / list index when locations move. With Proximity also on: keep by index for far moves; proximity remaps wrap-shifts, culls, grafts, and tree changes."
 
@@ -280,6 +285,12 @@ Public Class ButtonToggleComp
         RecordUndoEvent("Button Work When Hidden", New ButtonToggleUndo(Me))
         WorkWhenHidden = Not WorkWhenHidden
         SyncMouse()
+        Me.ExpireSolution(True)
+    End Sub
+
+    Private Sub Menu_ClickWhenHovered()
+        RecordUndoEvent("Button Click When Hovered", New ButtonToggleUndo(Me))
+        ClickWhenHovered = Not ClickWhenHovered
         Me.ExpireSolution(True)
     End Sub
 
@@ -331,6 +342,7 @@ Public Class ButtonToggleComp
             Case ZuiOptionalKind.Active : Return "Ac"
             Case ZuiOptionalKind.LockUnselected : Return "Lu"
             Case ZuiOptionalKind.WorkWhenHidden : Return "Wh"
+            Case ZuiOptionalKind.ClickWhenHovered : Return "Ch"
             Case ZuiOptionalKind.PreserveChanges : Return "Pr"
             Case ZuiOptionalKind.ProximityCache : Return "Px"
             Case ZuiOptionalKind.SaveShifted : Return "Ss"
@@ -460,6 +472,9 @@ Public Class ButtonToggleComp
             Case ZuiOptionalKind.WorkWhenHidden
                 Return CreateBoolZuiParam("Work when hidden", "Wh",
                     "When true, viewport clicking still works while this component is Hidden (preview off).")
+            Case ZuiOptionalKind.ClickWhenHovered
+                Return CreateBoolZuiParam("Click when hovered", "Ch",
+                    "When true, hovering a control activates it once (toggle or button). Leave and re-enter to activate again — no mouse click required.")
             Case ZuiOptionalKind.PreserveChanges
                 Return CreateBoolZuiParam("List cache", "Pr",
                     "Keep toggle state by tree path / list index when locations move. With Proximity: keep by index for far moves; proximity remaps wrap-shifts and tree changes.")
@@ -560,6 +575,7 @@ Public Class ButtonToggleComp
     Private Sub ApplyZuiBooleanInputs(DA As IGH_DataAccess)
         ApplyBoolInput(DA, FindInputIndexByNick("Lu"), LockUnselected, True)
         ApplyBoolInput(DA, FindInputIndexByNick("Wh"), WorkWhenHidden, False)
+        ApplyBoolInput(DA, FindInputIndexByNick("Ch"), ClickWhenHovered, False)
         ApplyBoolInput(DA, FindInputIndexByNick("Pr"), PreserveChanges, True)
         ApplyBoolInput(DA, FindInputIndexByNick("Px"), ProximityCache, False)
         If ProximityCache Then SaveShifted = True Else SaveShifted = False
@@ -695,6 +711,8 @@ Public Class ButtonToggleComp
     Public LockUnselected As Boolean = True
     ''' <summary>When true, viewport clicking stays enabled while the component is Hidden (preview off).</summary>
     Public WorkWhenHidden As Boolean = False
+    ''' <summary>When true, hovering a control activates it once; unhover and rehover to activate again.</summary>
+    Public ClickWhenHovered As Boolean = False
     Public ControlMode As Integer = ModeToggle
 
     Friend Slots As New List(Of ButtonToggleSlot)
@@ -862,7 +880,7 @@ Public Class ButtonToggleComp
 
     Friend Sub SetStateFromUndo(newStates As List(Of Boolean), newPressed As List(Of Boolean), newPreserve As Boolean, newProximity As Boolean,
                                 newSaveShifted As Boolean, newShifted As List(Of ShiftedButtonEntry), newMode As Integer, newLock As Boolean,
-                                Optional newWorkWhenHidden As Boolean = False)
+                                Optional newWorkWhenHidden As Boolean = False, Optional newClickWhenHovered As Boolean = False)
         States = New List(Of Boolean)(newStates)
         PressedSlots = New List(Of Boolean)(newPressed)
         PreserveChanges = newPreserve
@@ -872,6 +890,7 @@ Public Class ButtonToggleComp
         ControlMode = ClampMode(newMode)
         LockUnselected = newLock
         WorkWhenHidden = newWorkWhenHidden
+        ClickWhenHovered = newClickWhenHovered
         Me.ExpireSolution(True)
     End Sub
 
@@ -882,7 +901,8 @@ Public Class ButtonToggleComp
             IsSelectionAllowedForViewport() AndAlso
             previewOk AndAlso
             Slots.Count > 0
-        TagMouse.Enabled = want
+        ' Avoid Enabled flicker here — it re-enters hover poll and can double-toggle Click-when-hovered.
+        If TagMouse.Enabled <> want Then TagMouse.Enabled = want
         TagMouse.SetHoverPollActive(want)
         If Not want Then SetHoverIndex(-1)
     End Sub
@@ -900,6 +920,27 @@ Public Class ButtonToggleComp
         RecordUndoEvent("Button Toggle", New ButtonToggleUndo(Me))
         States(index) = Not States(index)
         Me.ExpireSolution(True)
+    End Sub
+
+    ''' <summary>One-shot activation used by Click when hovered (toggle flips once; button stays True until unhover).</summary>
+    Friend Sub ActivateSlotOnce(index As Integer)
+        If index < 0 OrElse index >= Slots.Count Then Return
+        If Not IsSlotActiveForViewport(index) Then Return
+        If ModeForIndex(index) = ModeToggle Then
+            ToggleSlot(index)
+        Else
+            SetButtonPressed(index, True)
+        End If
+    End Sub
+
+    ''' <summary>Queue one-shot hover activation on Idle so it cannot re-enter the hover poll (which would double-toggle).</summary>
+    Friend Sub ScheduleActivateSlotOnce(index As Integer)
+        If index < 0 OrElse index >= Slots.Count Then Return
+        If TagMouse Is Nothing Then
+            ActivateSlotOnce(index)
+            Return
+        End If
+        TagMouse.QueueHoverActivate(index)
     End Sub
 
     Friend Sub SetButtonPressed(index As Integer, isDown As Boolean)
@@ -2093,6 +2134,7 @@ Public Class ButtonToggleComp
         writer.SetBoolean("BT_SaveShifted", ProximityCache)
         writer.SetBoolean("BT_LockUnselected", LockUnselected)
         writer.SetBoolean("BT_WorkWhenHidden", WorkWhenHidden)
+        writer.SetBoolean("BT_ClickWhenHovered", ClickWhenHovered)
         writer.SetInt32("BT_Mode", ClampMode(ControlMode))
         writer.SetInt32("BT_Count", States.Count)
         For i As Integer = 0 To States.Count - 1
@@ -2133,6 +2175,10 @@ Public Class ButtonToggleComp
         Dim workHidden As Boolean = False
         reader.TryGetBoolean("BT_WorkWhenHidden", workHidden)
         WorkWhenHidden = workHidden
+
+        Dim clickHover As Boolean = False
+        reader.TryGetBoolean("BT_ClickWhenHovered", clickHover)
+        ClickWhenHovered = clickHover
 
         Dim mode As Integer = ModeToggle
         If reader.TryGetInt32("BT_Mode", mode) Then ControlMode = ClampMode(mode)
@@ -2206,6 +2252,7 @@ Public Class ButtonToggleUndo
     Private _mode As Integer
     Private _lockUnselected As Boolean
     Private _workWhenHidden As Boolean
+    Private _clickWhenHovered As Boolean
 
     Sub New(owner As ButtonToggleComp)
         _ownerId = owner.InstanceGuid
@@ -2218,6 +2265,7 @@ Public Class ButtonToggleUndo
         _mode = owner.ControlMode
         _lockUnselected = owner.LockUnselected
         _workWhenHidden = owner.WorkWhenHidden
+        _clickWhenHovered = owner.ClickWhenHovered
     End Sub
 
     Protected Overrides Sub Internal_Undo(doc As GH_Document)
@@ -2240,7 +2288,8 @@ Public Class ButtonToggleUndo
         Dim curMode As Integer = comp.ControlMode
         Dim curLock As Boolean = comp.LockUnselected
         Dim curWorkHidden As Boolean = comp.WorkWhenHidden
-        comp.SetStateFromUndo(_states, _pressed, _preserve, _proximity, _saveShifted, _shifted, _mode, _lockUnselected, _workWhenHidden)
+        Dim curClickHover As Boolean = comp.ClickWhenHovered
+        comp.SetStateFromUndo(_states, _pressed, _preserve, _proximity, _saveShifted, _shifted, _mode, _lockUnselected, _workWhenHidden, _clickWhenHovered)
         _states = curStates
         _pressed = curPressed
         _preserve = curPreserve
@@ -2250,50 +2299,113 @@ Public Class ButtonToggleUndo
         _mode = curMode
         _lockUnselected = curLock
         _workWhenHidden = curWorkHidden
+        _clickWhenHovered = curClickHover
     End Sub
 
 End Class
 
-''' <summary>Viewport clicks on points / text / clickable areas.</summary>
+''' <summary>
+''' Viewport clicks on points / text / clickable areas.
+''' Activation is driven by polling OS left-button edges while hovered — MouseCallback Cancel
+''' alone cannot deliver rapid same-pixel clicks (Rhino latches until the cursor moves).
+''' </summary>
 Public Class ButtonToggleMouse
     Inherits Rhino.UI.MouseCallback
 
     Private ReadOnly Comp As ButtonToggleComp
-    Private Const ClickSlopPx As Double = 4.0R
 
-    Private _pendingHit As Integer = -1
-    Private _buttonHeld As Integer = -1
-    Private _downViewport As Drawing.Point
     Private _hoverTimer As Timer
     Private _hoverPollActive As Boolean
     Private _hookedCanvas As GH_Canvas
+    Private _rearmIdleHooked As Boolean = False
+
+    ''' <summary>Previous poll sample of left mouse button.</summary>
+    Private _pollLeftDown As Boolean = False
+    ''' <summary>Slot armed on left-button rising edge; completed on falling edge.</summary>
+    Private _pollArmedHit As Integer = -1
+    ''' <summary>Stable hover index (hysteresis). Used for highlight + Click-when-hovered enter.</summary>
+    Private _stableHover As Integer = -1
+    ''' <summary>Consecutive polls with no hit while leaving a slot — avoids flicker re-arm.</summary>
+    Private _leaveMissStreak As Integer = 0
+    Private Const LeaveConfirmPolls As Integer = 3
+    ''' <summary>Queued Click-when-hovered activation (runs on Idle to avoid re-entrant double-toggle).</summary>
+    Private _pendingHoverActivate As Integer = -1
+    Private _hoverActivateIdleHooked As Boolean = False
+    ''' <summary>Re-entrancy guard while PollInteraction is on the stack.</summary>
+    Private _polling As Boolean = False
 
     Sub New(owner As ButtonToggleComp)
         Comp = owner
     End Sub
 
     Friend Sub SetHoverPollActive(active As Boolean)
-        _hoverPollActive = active AndAlso Me.Enabled
-        If _hoverPollActive Then
+        Dim want As Boolean = active AndAlso Me.Enabled
+        If want Then
+            Dim wasActive As Boolean = _hoverPollActive
+            _hoverPollActive = True
             EnsureHoverTimer()
             _hoverTimer.Enabled = True
-            AttachGhCanvasHoverHook()
-            PollHoverFromGlobalCursor()
+            If Not wasActive Then
+                AttachGhCanvasHoverHook()
+                ' Fresh enable: clear leave state so the first real enter can fire.
+                _leaveMissStreak = 0
+                PollInteraction()
+            End If
         Else
+            _hoverPollActive = False
             If _hoverTimer IsNot Nothing Then _hoverTimer.Enabled = False
             DetachGhCanvasHoverHook()
+            CancelArmedPress()
+            ReleaseHoverHeldButton(_stableHover)
+            _pollLeftDown = False
+            _stableHover = -1
+            _leaveMissStreak = 0
+            _pendingHoverActivate = -1
             If Comp IsNot Nothing Then Comp.SetHoverIndex(-1)
         End If
     End Sub
 
+    Friend Sub QueueHoverActivate(index As Integer)
+        If index < 0 Then Return
+        _pendingHoverActivate = index
+        If _hoverActivateIdleHooked Then Return
+        _hoverActivateIdleHooked = True
+        AddHandler Rhino.RhinoApp.Idle, AddressOf OnIdleHoverActivate
+    End Sub
+
+    Private Sub OnIdleHoverActivate(sender As Object, e As EventArgs)
+        RemoveHandler Rhino.RhinoApp.Idle, AddressOf OnIdleHoverActivate
+        _hoverActivateIdleHooked = False
+        Dim ix As Integer = _pendingHoverActivate
+        _pendingHoverActivate = -1
+        Try
+            If Comp IsNot Nothing AndAlso ix >= 0 Then
+                Comp.ActivateSlotOnce(ix)
+            End If
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>Click-when-hovered button: True while hovered, False on leave (no pulse).</summary>
+    Private Sub ReleaseHoverHeldButton(index As Integer)
+        If Comp Is Nothing OrElse index < 0 Then Return
+        If Not Comp.ClickWhenHovered Then Return
+        If Comp.ModeForIndex(index) <> ButtonToggleComp.ModeButton Then Return
+        Try
+            Comp.SetButtonPressed(index, False)
+        Catch
+        End Try
+    End Sub
+
     Private Sub EnsureHoverTimer()
         If _hoverTimer IsNot Nothing Then Return
-        _hoverTimer = New Timer With {.Interval = 40}
+        ' Fast enough to catch rapid click edges; hover updates are cheap.
+        _hoverTimer = New Timer With {.Interval = 16}
         AddHandler _hoverTimer.Tick, AddressOf OnHoverPollTick
     End Sub
 
     Private Sub OnHoverPollTick(sender As Object, e As EventArgs)
-        PollHoverFromGlobalCursor()
+        PollInteraction()
     End Sub
 
     Private Sub AttachGhCanvasHoverHook()
@@ -2311,7 +2423,7 @@ Public Class ButtonToggleMouse
     End Sub
 
     Private Sub GhCanvas_MouseMoveHover(sender As Object, e As MouseEventArgs)
-        PollHoverFromGlobalCursor()
+        PollInteraction()
     End Sub
 
     Private Shared Function TryResolveGrasshopperCanvas() As GH_Canvas
@@ -2332,156 +2444,176 @@ Public Class ButtonToggleMouse
         Return Nothing
     End Function
 
-    Friend Sub PollHoverFromGlobalCursor()
-        If Not _hoverPollActive OrElse Comp Is Nothing OrElse _pendingHit >= 0 OrElse _buttonHeld >= 0 Then Return
-        Try
-            Dim screenPt As Drawing.Point = Control.MousePosition
-            Dim ghDoc As GH_Document = Comp.OnPingDocument()
-            Dim targetDoc As Rhino.RhinoDoc = If(ghDoc IsNot Nothing, ghDoc.RhinoDocument, Nothing)
-            If targetDoc Is Nothing Then targetDoc = Rhino.RhinoDoc.ActiveDoc
-            If targetDoc Is Nothing Then
-                Comp.SetHoverIndex(-1)
-                Return
-            End If
+    Private Function TryPickAtScreenPoint(screenPt As Drawing.Point, ByRef hit As Integer, ByRef vp As RhinoViewport) As Boolean
+        hit = -1
+        vp = Nothing
+        If Comp Is Nothing Then Return False
+        Dim ghDoc As GH_Document = Comp.OnPingDocument()
+        Dim targetDoc As Rhino.RhinoDoc = If(ghDoc IsNot Nothing, ghDoc.RhinoDocument, Nothing)
+        If targetDoc Is Nothing Then targetDoc = Rhino.RhinoDoc.ActiveDoc
+        If targetDoc Is Nothing Then Return False
 
-            For Each view As Rhino.Display.RhinoView In targetDoc.Views
-                If view Is Nothing Then Continue For
-                If view.Document IsNot targetDoc Then Continue For
-                Dim rect As Drawing.Rectangle = view.ScreenRectangle
-                If rect.Width <= 0 OrElse rect.Height <= 0 Then Continue For
-                If Not rect.Contains(screenPt) Then Continue For
-                Dim clientPt As Drawing.Point = view.ScreenToClient(screenPt)
-                Dim vp As RhinoViewport = view.ActiveViewport
-                If vp Is Nothing Then Continue For
-                Comp.SetHoverIndex(Comp.PickSlotIndexAtViewport(vp, clientPt))
-                Return
-            Next
-            Comp.SetHoverIndex(-1)
-        Catch
-        End Try
-    End Sub
+        For Each view As Rhino.Display.RhinoView In targetDoc.Views
+            If view Is Nothing Then Continue For
+            If view.Document IsNot targetDoc Then Continue For
+            Dim rect As Drawing.Rectangle = view.ScreenRectangle
+            If rect.Width <= 0 OrElse rect.Height <= 0 Then Continue For
+            If Not rect.Contains(screenPt) Then Continue For
+            Dim clientPt As Drawing.Point = view.ScreenToClient(screenPt)
+            vp = view.ActiveViewport
+            If vp Is Nothing Then Continue For
+            hit = ResolveHitAtViewport(vp, clientPt)
+            Return True
+        Next
+        Return False
+    End Function
 
-    Private Sub UpdateHoverFromViewport(e As Rhino.UI.MouseCallbackEventArgs)
-        If Comp Is Nothing OrElse e.View Is Nothing Then Return
-        Dim vp As RhinoViewport = e.View.ActiveViewport
-        If vp Is Nothing Then Return
-        Comp.SetHoverIndex(Comp.PickSlotIndexAtViewport(vp, e.ViewportPoint))
-    End Sub
-
-    Private Sub ResumeHoverPoll()
-        If _hoverPollActive AndAlso _hoverTimer IsNot Nothing Then _hoverTimer.Enabled = True
-        PollHoverFromGlobalCursor()
-    End Sub
+    Private Function ResolveHitAtViewport(vp As RhinoViewport, viewportPoint As Drawing.Point) As Integer
+        Return Comp.PickSlotIndexAtViewport(vp, viewportPoint)
+    End Function
 
     ''' <summary>
-    ''' After Cancelled viewport clicks, Rhino often ignores the next MouseDown at the same pixel until the cursor moves.
-    ''' Flipping Enabled re-arms MouseCallback so rapid clicks on the same clickable area keep working.
+    ''' Stabilize raw picks: brief misses while still over a control must not clear hover
+    ''' (that would re-arm Click-when-hovered and often double-toggle back to the old state).
     ''' </summary>
-    Private Sub RearmMouseCallback()
+    Private Function StabilizeHoverHit(rawHit As Integer) As Integer
+        If rawHit >= 0 Then
+            _leaveMissStreak = 0
+            Return rawHit
+        End If
+        If _stableHover < 0 Then
+            _leaveMissStreak = 0
+            Return -1
+        End If
+        _leaveMissStreak += 1
+        If _leaveMissStreak >= LeaveConfirmPolls Then
+            _leaveMissStreak = 0
+            Return -1
+        End If
+        Return _stableHover
+    End Function
+
+    ''' <summary>Hover + left-button edge detection. OS button state keeps working when MouseCallback latches.</summary>
+    Friend Sub PollInteraction()
+        If Not _hoverPollActive OrElse Comp Is Nothing OrElse _polling Then Return
+        _polling = True
         Try
-            Dim was As Boolean = Me.Enabled
+            Dim screenPt As Drawing.Point = Control.MousePosition
+            Dim hit As Integer = -1
+            Dim vp As RhinoViewport = Nothing
+            Dim overView As Boolean = TryPickAtScreenPoint(screenPt, hit, vp)
+            Dim rawHit As Integer = If(overView, hit, -1)
+            Dim hoverHit As Integer = StabilizeHoverHit(rawHit)
+
+            If _pollArmedHit < 0 Then
+                Comp.SetHoverIndex(hoverHit)
+            End If
+
+            ' Click when hovered:
+            ' - Toggle: flip once on enter (leave + re-enter to fire again)
+            ' - Button: True while hovered, False on unhover (no pulse)
+            If Comp.ClickWhenHovered AndAlso hoverHit <> _stableHover Then
+                Dim prevHover As Integer = _stableHover
+                ' Arm new hover before side effects so ExpireSolution re-entry cannot double-fire toggle.
+                _stableHover = hoverHit
+                ReleaseHoverHeldButton(prevHover)
+                If hoverHit >= 0 AndAlso Comp.IsSlotActiveForViewport(hoverHit) Then
+                    If Comp.ModeForIndex(hoverHit) = ButtonToggleComp.ModeToggle Then
+                        Comp.ScheduleActivateSlotOnce(hoverHit)
+                    Else
+                        Comp.SetButtonPressed(hoverHit, True)
+                    End If
+                End If
+            Else
+                _stableHover = hoverHit
+            End If
+
+            Dim leftDown As Boolean = (Control.MouseButtons And MouseButtons.Left) = MouseButtons.Left
+
+            If leftDown AndAlso Not _pollLeftDown Then
+                ' Rising edge: arm the control under the cursor.
+                If hoverHit >= 0 AndAlso Comp.IsSlotActiveForViewport(hoverHit) Then
+                    _pollArmedHit = hoverHit
+                    Comp.SetHoverIndex(hoverHit)
+                    If Comp.ModeForIndex(hoverHit) = ButtonToggleComp.ModeButton Then
+                        Comp.SetButtonPressed(hoverHit, True)
+                    End If
+                End If
+            ElseIf (Not leftDown) AndAlso _pollLeftDown Then
+                ' Falling edge: complete toggle / release button.
+                Dim armed As Integer = _pollArmedHit
+                _pollArmedHit = -1
+                If armed >= 0 AndAlso armed < Comp.Slots.Count Then
+                    If Comp.ModeForIndex(armed) = ButtonToggleComp.ModeToggle Then
+                        Comp.ToggleSlot(armed)
+                    ElseIf Comp.ModeForIndex(armed) = ButtonToggleComp.ModeButton Then
+                        Comp.SetButtonPressed(armed, False)
+                    End If
+                End If
+                ScheduleRearmMouseCallback()
+            End If
+
+            _pollLeftDown = leftDown
+        Catch
+        Finally
+            _polling = False
+        End Try
+    End Sub
+
+    Private Sub CancelArmedPress()
+        If _pollArmedHit < 0 OrElse Comp Is Nothing Then
+            _pollArmedHit = -1
+            Return
+        End If
+        Dim ix As Integer = _pollArmedHit
+        _pollArmedHit = -1
+        If Comp.ModeForIndex(ix) = ButtonToggleComp.ModeButton Then
+            Comp.SetButtonPressed(ix, False)
+        End If
+    End Sub
+
+    Private Sub ScheduleRearmMouseCallback()
+        If _rearmIdleHooked Then Return
+        _rearmIdleHooked = True
+        AddHandler Rhino.RhinoApp.Idle, AddressOf OnIdleRearmMouse
+    End Sub
+
+    Private Sub OnIdleRearmMouse(sender As Object, e As EventArgs)
+        RemoveHandler Rhino.RhinoApp.Idle, AddressOf OnIdleRearmMouse
+        _rearmIdleHooked = False
+        Try
             Me.Enabled = False
-            Me.Enabled = was
+            If Comp IsNot Nothing Then
+                Comp.SyncMouse()
+            Else
+                Me.Enabled = True
+            End If
         Catch
         End Try
     End Sub
 
-    Private Sub FinishClickInteraction(Optional cancelEvent As Rhino.UI.MouseCallbackEventArgs = Nothing)
-        ResumeHoverPoll()
-        RearmMouseCallback()
-        If cancelEvent IsNot Nothing Then cancelEvent.Cancel = True
-    End Sub
-
-    Private Sub ReleaseHeldButton()
-        If _buttonHeld < 0 OrElse Comp Is Nothing Then
-            _buttonHeld = -1
-            Return
-        End If
-        Dim ix As Integer = _buttonHeld
-        _buttonHeld = -1
-        Comp.SetButtonPressed(ix, False)
-    End Sub
-
+    ''' <summary>Only eats Rhino selection when the cursor is on a control. Activation is poll-based.</summary>
     Protected Overrides Sub OnMouseDown(e As Rhino.UI.MouseCallbackEventArgs)
         MyBase.OnMouseDown(e)
-        _pendingHit = -1
-        If Comp Is Nothing Then Exit Sub
-        If e.Button <> MouseButtons.Left Then Exit Sub
-        If e.View Is Nothing Then Exit Sub
-
-        ' Clear a stuck momentary press if a prior MouseUp was dropped.
-        If _buttonHeld >= 0 Then ReleaseHeldButton()
-
+        If Comp Is Nothing OrElse e.Button <> MouseButtons.Left OrElse e.View Is Nothing Then Exit Sub
         Dim vp As RhinoViewport = e.View.ActiveViewport
         If vp Is Nothing Then Exit Sub
-
-        Dim hit As Integer = Comp.PickSlotIndexAtViewport(vp, e.ViewportPoint)
+        Dim hit As Integer = ResolveHitAtViewport(vp, e.ViewportPoint)
         If hit < 0 Then Exit Sub
-
-        _pendingHit = hit
-        _downViewport = e.ViewportPoint
-        If _hoverTimer IsNot Nothing Then _hoverTimer.Enabled = False
-        Comp.SetHoverIndex(hit)
-
-        If Comp.ModeForIndex(hit) = ButtonToggleComp.ModeButton Then
-            _buttonHeld = hit
-            Comp.SetButtonPressed(hit, True)
-        End If
-
         e.Cancel = True
+        ScheduleRearmMouseCallback()
     End Sub
 
     Protected Overrides Sub OnMouseMove(e As Rhino.UI.MouseCallbackEventArgs)
         MyBase.OnMouseMove(e)
-        If _pendingHit < 0 AndAlso _buttonHeld < 0 Then
-            UpdateHoverFromViewport(e)
-            Exit Sub
-        End If
-        Dim dx As Double = CDbl(e.ViewportPoint.X) - CDbl(_downViewport.X)
-        Dim dy As Double = CDbl(e.ViewportPoint.Y) - CDbl(_downViewport.Y)
-        If (dx * dx + dy * dy) > (ClickSlopPx * ClickSlopPx) Then
-            If _buttonHeld >= 0 Then ReleaseHeldButton()
-            _pendingHit = -1
-            FinishClickInteraction()
-            Exit Sub
-        End If
-        ' Do not Cancel mouse-move: cancelling moves after a Cancelled mouse-down leaves Rhino
-        ' unable to deliver another click until the cursor actually moves.
+        ' Also poll on viewport moves so slow hover-enter is not timer-only.
+        If _hoverPollActive Then PollInteraction()
     End Sub
 
     Protected Overrides Sub OnMouseUp(e As Rhino.UI.MouseCallbackEventArgs)
         MyBase.OnMouseUp(e)
-        Dim hit As Integer = _pendingHit
-        _pendingHit = -1
-
-        If _buttonHeld >= 0 Then
-            ReleaseHeldButton()
-            FinishClickInteraction(e)
-            Exit Sub
-        End If
-
-        If hit < 0 Then
-            FinishClickInteraction()
-            Exit Sub
-        End If
-        If Comp Is Nothing Then
-            FinishClickInteraction()
-            Exit Sub
-        End If
-        If e.Button <> MouseButtons.Left Then
-            FinishClickInteraction()
-            Exit Sub
-        End If
-        If hit >= Comp.Slots.Count Then
-            FinishClickInteraction()
-            Exit Sub
-        End If
-
-        If Comp.ModeForIndex(hit) = ButtonToggleComp.ModeToggle Then
-            Comp.ToggleSlot(hit)
-        End If
-
-        FinishClickInteraction(e)
+        ' Do not Cancel — let Rhino clear its click latch. Poll handles the action.
+        ScheduleRearmMouseCallback()
     End Sub
 
 End Class
