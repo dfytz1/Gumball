@@ -160,7 +160,12 @@ Friend Module ViewportPreview
                     Continue For
                 End If
                 Dim slider As CurveSliderComp = TryCast(obj, CurveSliderComp)
-                If slider IsNot Nothing Then slider.SyncViewportInteraction()
+                If slider IsNot Nothing Then
+                    slider.SyncViewportInteraction()
+                    Continue For
+                End If
+                Dim button As ButtonToggleComp = TryCast(obj, ButtonToggleComp)
+                If button IsNot Nothing Then button.SyncMouse()
             Next
         Catch
         End Try

@@ -66,6 +66,7 @@ Public Class ButtonToggleComp
         ProximityCache = 17
         SaveShifted = 18
         ClearCache = 19
+        WorkWhenHidden = 20
     End Enum
 
     Private Shared ReadOnly ZuiCanonicalOrder As ZuiOptionalKind() = {
@@ -85,6 +86,7 @@ Public Class ButtonToggleComp
         ZuiOptionalKind.Font,
         ZuiOptionalKind.Active,
         ZuiOptionalKind.LockUnselected,
+        ZuiOptionalKind.WorkWhenHidden,
         ZuiOptionalKind.PreserveChanges,
         ZuiOptionalKind.ProximityCache,
         ZuiOptionalKind.ClearCache
@@ -241,6 +243,9 @@ Public Class ButtonToggleComp
         Dim lockUnsel As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Lock unselected", AddressOf Menu_LockUnselected, True, MenuBoolChecked(LockUnselected, ZuiOptionalKind.LockUnselected))
         lockUnsel.ToolTipText = "When on, controls can be clicked only while this component is selected on the Grasshopper canvas."
 
+        Dim workHidden As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Work when hidden", AddressOf Menu_WorkWhenHidden, True, MenuBoolChecked(WorkWhenHidden, ZuiOptionalKind.WorkWhenHidden))
+        workHidden.ToolTipText = "When on, viewport clicking still works while this component is Hidden (preview off)."
+
         Dim listCache As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "List cache", AddressOf Menu_PreserveChanges, True, MenuBoolChecked(PreserveChanges, ZuiOptionalKind.PreserveChanges))
         listCache.ToolTipText = "Keep toggle state by tree path / list index when locations move. With Proximity also on: keep by index for far moves; proximity remaps wrap-shifts, culls, grafts, and tree changes."
 
@@ -268,6 +273,13 @@ Public Class ButtonToggleComp
     Private Sub Menu_LockUnselected()
         RecordUndoEvent("Button Lock Unselected", New ButtonToggleUndo(Me))
         LockUnselected = Not LockUnselected
+        Me.ExpireSolution(True)
+    End Sub
+
+    Private Sub Menu_WorkWhenHidden()
+        RecordUndoEvent("Button Work When Hidden", New ButtonToggleUndo(Me))
+        WorkWhenHidden = Not WorkWhenHidden
+        SyncMouse()
         Me.ExpireSolution(True)
     End Sub
 
@@ -318,6 +330,7 @@ Public Class ButtonToggleComp
             Case ZuiOptionalKind.Font : Return "Fn"
             Case ZuiOptionalKind.Active : Return "Ac"
             Case ZuiOptionalKind.LockUnselected : Return "Lu"
+            Case ZuiOptionalKind.WorkWhenHidden : Return "Wh"
             Case ZuiOptionalKind.PreserveChanges : Return "Pr"
             Case ZuiOptionalKind.ProximityCache : Return "Px"
             Case ZuiOptionalKind.SaveShifted : Return "Ss"
@@ -444,6 +457,9 @@ Public Class ButtonToggleComp
             Case ZuiOptionalKind.LockUnselected
                 Return CreateBoolZuiParam("Lock unselected", "Lu",
                     "When true, viewport picking works only while this component is selected on the Grasshopper canvas.")
+            Case ZuiOptionalKind.WorkWhenHidden
+                Return CreateBoolZuiParam("Work when hidden", "Wh",
+                    "When true, viewport clicking still works while this component is Hidden (preview off).")
             Case ZuiOptionalKind.PreserveChanges
                 Return CreateBoolZuiParam("List cache", "Pr",
                     "Keep toggle state by tree path / list index when locations move. With Proximity: keep by index for far moves; proximity remaps wrap-shifts and tree changes.")
@@ -543,6 +559,7 @@ Public Class ButtonToggleComp
 
     Private Sub ApplyZuiBooleanInputs(DA As IGH_DataAccess)
         ApplyBoolInput(DA, FindInputIndexByNick("Lu"), LockUnselected, True)
+        ApplyBoolInput(DA, FindInputIndexByNick("Wh"), WorkWhenHidden, False)
         ApplyBoolInput(DA, FindInputIndexByNick("Pr"), PreserveChanges, True)
         ApplyBoolInput(DA, FindInputIndexByNick("Px"), ProximityCache, False)
         If ProximityCache Then SaveShifted = True Else SaveShifted = False
@@ -676,6 +693,8 @@ Public Class ButtonToggleComp
     ''' <summary>Always mirrors ProximityCache. Kept for serialization / undo compatibility.</summary>
     Public SaveShifted As Boolean = False
     Public LockUnselected As Boolean = True
+    ''' <summary>When true, viewport clicking stays enabled while the component is Hidden (preview off).</summary>
+    Public WorkWhenHidden As Boolean = False
     Public ControlMode As Integer = ModeToggle
 
     Friend Slots As New List(Of ButtonToggleSlot)
@@ -842,7 +861,8 @@ Public Class ButtonToggleComp
     End Sub
 
     Friend Sub SetStateFromUndo(newStates As List(Of Boolean), newPressed As List(Of Boolean), newPreserve As Boolean, newProximity As Boolean,
-                                newSaveShifted As Boolean, newShifted As List(Of ShiftedButtonEntry), newMode As Integer, newLock As Boolean)
+                                newSaveShifted As Boolean, newShifted As List(Of ShiftedButtonEntry), newMode As Integer, newLock As Boolean,
+                                Optional newWorkWhenHidden As Boolean = False)
         States = New List(Of Boolean)(newStates)
         PressedSlots = New List(Of Boolean)(newPressed)
         PreserveChanges = newPreserve
@@ -851,18 +871,25 @@ Public Class ButtonToggleComp
         ShiftedEntries = If(newShifted Is Nothing, New List(Of ShiftedButtonEntry), New List(Of ShiftedButtonEntry)(newShifted))
         ControlMode = ClampMode(newMode)
         LockUnselected = newLock
+        WorkWhenHidden = newWorkWhenHidden
         Me.ExpireSolution(True)
     End Sub
 
     Friend Sub SyncMouse()
         If TagMouse Is Nothing Then Return
+        Dim previewOk As Boolean = WorkWhenHidden OrElse ViewportPreview.IsEffectivelyPreviewed(Me)
         Dim want As Boolean =
             IsSelectionAllowedForViewport() AndAlso
-            ViewportPreview.IsEffectivelyPreviewed(Me) AndAlso
+            previewOk AndAlso
             Slots.Count > 0
         TagMouse.Enabled = want
         TagMouse.SetHoverPollActive(want)
         If Not want Then SetHoverIndex(-1)
+    End Sub
+
+    Public Overrides Sub ExpirePreview(redraw As Boolean)
+        MyBase.ExpirePreview(redraw)
+        SyncMouse()
     End Sub
 
     Friend Sub ToggleSlot(index As Integer)
@@ -2065,6 +2092,7 @@ Public Class ButtonToggleComp
         writer.SetBoolean("BT_Proximity", ProximityCache)
         writer.SetBoolean("BT_SaveShifted", ProximityCache)
         writer.SetBoolean("BT_LockUnselected", LockUnselected)
+        writer.SetBoolean("BT_WorkWhenHidden", WorkWhenHidden)
         writer.SetInt32("BT_Mode", ClampMode(ControlMode))
         writer.SetInt32("BT_Count", States.Count)
         For i As Integer = 0 To States.Count - 1
@@ -2101,6 +2129,10 @@ Public Class ButtonToggleComp
         Dim lockUnsel As Boolean = True
         reader.TryGetBoolean("BT_LockUnselected", lockUnsel)
         LockUnselected = lockUnsel
+
+        Dim workHidden As Boolean = False
+        reader.TryGetBoolean("BT_WorkWhenHidden", workHidden)
+        WorkWhenHidden = workHidden
 
         Dim mode As Integer = ModeToggle
         If reader.TryGetInt32("BT_Mode", mode) Then ControlMode = ClampMode(mode)
@@ -2173,6 +2205,7 @@ Public Class ButtonToggleUndo
     Private _shifted As List(Of ShiftedButtonEntry)
     Private _mode As Integer
     Private _lockUnselected As Boolean
+    Private _workWhenHidden As Boolean
 
     Sub New(owner As ButtonToggleComp)
         _ownerId = owner.InstanceGuid
@@ -2184,6 +2217,7 @@ Public Class ButtonToggleUndo
         _shifted = If(owner.ShiftedEntries Is Nothing, New List(Of ShiftedButtonEntry), New List(Of ShiftedButtonEntry)(owner.ShiftedEntries))
         _mode = owner.ControlMode
         _lockUnselected = owner.LockUnselected
+        _workWhenHidden = owner.WorkWhenHidden
     End Sub
 
     Protected Overrides Sub Internal_Undo(doc As GH_Document)
@@ -2205,7 +2239,8 @@ Public Class ButtonToggleUndo
         Dim curShifted As List(Of ShiftedButtonEntry) = If(comp.ShiftedEntries Is Nothing, New List(Of ShiftedButtonEntry), New List(Of ShiftedButtonEntry)(comp.ShiftedEntries))
         Dim curMode As Integer = comp.ControlMode
         Dim curLock As Boolean = comp.LockUnselected
-        comp.SetStateFromUndo(_states, _pressed, _preserve, _proximity, _saveShifted, _shifted, _mode, _lockUnselected)
+        Dim curWorkHidden As Boolean = comp.WorkWhenHidden
+        comp.SetStateFromUndo(_states, _pressed, _preserve, _proximity, _saveShifted, _shifted, _mode, _lockUnselected, _workWhenHidden)
         _states = curStates
         _pressed = curPressed
         _preserve = curPreserve
@@ -2214,6 +2249,7 @@ Public Class ButtonToggleUndo
         _shifted = curShifted
         _mode = curMode
         _lockUnselected = curLock
+        _workWhenHidden = curWorkHidden
     End Sub
 
 End Class
