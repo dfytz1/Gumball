@@ -42,27 +42,28 @@ Public Class TextTagComp
         None = -1
         Size = 0
         Colour = 1
-        Text = 2
-        Active = 3
-        LockUnselected = 4
-        PreserveChanges = 5
-        ProximityCache = 6
-        SaveShifted = 7
-        ClearCache = 8
-        JustifyMultiline = 9
-        HorizontalAlign = 10
-        VerticalAlign = 11
+        Font = 2
+        Text = 3
+        Active = 4
+        LockUnselected = 5
+        PreserveChanges = 6
+        ProximityCache = 7
+        SaveShifted = 8
+        ClearCache = 9
+        JustifyMultiline = 10
+        HorizontalAlign = 11
+        VerticalAlign = 12
     End Enum
 
     Private Shared ReadOnly ZuiCanonicalOrder As ZuiOptionalKind() = {
         ZuiOptionalKind.Size,
         ZuiOptionalKind.Colour,
+        ZuiOptionalKind.Font,
         ZuiOptionalKind.Text,
         ZuiOptionalKind.Active,
         ZuiOptionalKind.LockUnselected,
         ZuiOptionalKind.PreserveChanges,
         ZuiOptionalKind.ProximityCache,
-        ZuiOptionalKind.SaveShifted,
         ZuiOptionalKind.ClearCache,
         ZuiOptionalKind.JustifyMultiline,
         ZuiOptionalKind.HorizontalAlign,
@@ -75,6 +76,7 @@ Public Class TextTagComp
     Friend Structure TextTagSlotSettings
         Public Active As Boolean
         Public TextHeight As Double
+        Public FontFace As String
         Public TagColour As Color
         Public HasCustomColour As Boolean
         Public HorizontalAlign As Rhino.DocObjects.TextHorizontalAlignment
@@ -198,15 +200,11 @@ Public Class TextTagComp
 
         Menu_AppendSeparator(menu)
 
-        Dim preserve As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Preserve changes", AddressOf Menu_PreserveChanges, True, MenuBoolChecked(PreserveChanges, ZuiOptionalKind.PreserveChanges))
-        preserve.ToolTipText = "Keep entered text (per item index) when upstream points/planes move or change."
+        Dim listCache As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "List cache", AddressOf Menu_PreserveChanges, True, MenuBoolChecked(PreserveChanges, ZuiOptionalKind.PreserveChanges))
+        listCache.ToolTipText = "Keep entered text by tree path / list index when locations move. With Proximity also on: keep by index for far moves; proximity remaps wrap-shifts, culls, grafts, and tree changes."
 
         Dim proximity As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Proximity cache", AddressOf Menu_ProximityCache, True, MenuBoolChecked(ProximityCache, ZuiOptionalKind.ProximityCache))
-        proximity.ToolTipText = "When the list changes, re-attach each text to the nearest cached location instead of the list index, so list shifts keep the right text on the right point."
-
-        Dim saveShifted As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Save shifted", AddressOf Menu_SaveShifted, True, MenuBoolChecked(Me.SaveShifted, ZuiOptionalKind.SaveShifted))
-        saveShifted.Enabled = MenuBoolChecked(ProximityCache, ZuiOptionalKind.ProximityCache)
-        saveShifted.ToolTipText = "When proximity cache is on, remember text for anchors that leave the list and restore it if the point returns."
+        proximity.ToolTipText = "Re-attach text by nearest cached location on wrap-shifts, culls, grafts, and other list/tree changes. Culled anchors are always saved and restored if they return (save-shifted)."
 
         Dim cc As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Clear cache", AddressOf Menu_ClearCache, True)
         cc.ToolTipText = "Erase all entered text."
@@ -248,20 +246,15 @@ Public Class TextTagComp
     End Sub
 
     Private Sub Menu_PreserveChanges()
-        RecordUndoEvent("Text Tag Preserve", New TextTagUndo(Me))
+        RecordUndoEvent("Text Tag List Cache", New TextTagUndo(Me))
         PreserveChanges = Not PreserveChanges
+        Me.ExpireSolution(True)
     End Sub
 
     Private Sub Menu_ProximityCache()
         RecordUndoEvent("Text Tag Proximity", New TextTagUndo(Me))
         ProximityCache = Not ProximityCache
-        Me.ExpireSolution(True)
-    End Sub
-
-    Private Sub Menu_SaveShifted()
-        If Not MenuBoolChecked(ProximityCache, ZuiOptionalKind.ProximityCache) Then Return
-        RecordUndoEvent("Text Tag Save Shifted", New TextTagUndo(Me))
-        SaveShifted = Not SaveShifted
+        If ProximityCache Then SaveShifted = True
         Me.ExpireSolution(True)
     End Sub
 
@@ -335,6 +328,7 @@ Public Class TextTagComp
         Select Case kind
             Case ZuiOptionalKind.Size : Return "S"
             Case ZuiOptionalKind.Colour : Return "C"
+            Case ZuiOptionalKind.Font : Return "Fn"
             Case ZuiOptionalKind.Text : Return "Tx"
             Case ZuiOptionalKind.Active : Return "Ac"
             Case ZuiOptionalKind.LockUnselected : Return "Lu"
@@ -399,6 +393,14 @@ Public Class TextTagComp
                     .Description = "Dot and text colour per tag (tree paths match P).",
                     .Access = GH_ParamAccess.tree
                 }
+            Case ZuiOptionalKind.Font
+                Return New Grasshopper.Kernel.Parameters.Param_String With {
+                    .Optional = True,
+                    .Name = "Font",
+                    .NickName = "Fn",
+                    .Description = "Font face name per tag (tree paths match P), e.g. Arial or Helvetica.",
+                    .Access = GH_ParamAccess.tree
+                }
             Case ZuiOptionalKind.Text
                 Return New Grasshopper.Kernel.Parameters.Param_String With {
                     .Optional = True,
@@ -415,14 +417,15 @@ Public Class TextTagComp
                 Return CreateBoolZuiParam("Lock unselected", "Lu",
                     "When true, viewport picking works only while this component is selected on the Grasshopper canvas. Overridden by Active when that input is present.")
             Case ZuiOptionalKind.PreserveChanges
-                Return CreateBoolZuiParam("Preserve changes", "Pr",
-                    "Keep entered text per item index when upstream points/planes move or change.")
+                Return CreateBoolZuiParam("List cache", "Pr",
+                    "Keep entered text by tree path / list index when locations move. With Proximity: keep by index for far moves; proximity remaps wrap-shifts and tree changes.")
             Case ZuiOptionalKind.ProximityCache
                 Return CreateBoolZuiParam("Proximity cache", "Px",
-                    "When the list changes, re-attach each text to the nearest cached location instead of the list index.")
+                    "Re-attach text by nearest cached location on wrap-shifts, culls, grafts, and other list/tree changes. Culled anchors are always saved and restored if they return.")
             Case ZuiOptionalKind.SaveShifted
+                ' Legacy ZUI nick Ss — save-shifted is always on whenever Proximity cache is on.
                 Return CreateBoolZuiParam("Save shifted", "Ss",
-                    "When proximity cache is on, remember text for anchors that leave the list and restore it if they return.")
+                    "Legacy input; ignored. Save-shifted is always active when Proximity cache is on.")
             Case ZuiOptionalKind.ClearCache
                 Return CreateBoolZuiParam("Clear cache", "Cc",
                     "Pulse true to erase all entered text (rising edge only).")
@@ -558,7 +561,8 @@ Public Class TextTagComp
         ApplyBoolInput(DA, FindInputIndexByNick("Lu"), LockUnselected, True)
         ApplyBoolInput(DA, FindInputIndexByNick("Pr"), PreserveChanges, True)
         ApplyBoolInput(DA, FindInputIndexByNick("Px"), ProximityCache, False)
-        ApplyBoolInput(DA, FindInputIndexByNick("Ss"), SaveShifted, False)
+        ' Legacy Ss input is ignored; save-shifted is always on with proximity cache.
+        If ProximityCache Then SaveShifted = True Else SaveShifted = False
         ApplyBoolInput(DA, FindInputIndexByNick("Jl"), JustifyMultilineLines, JustifyMultilineLines)
 
         Dim ccIx As Integer = FindInputIndexByNick("Cc")
@@ -606,6 +610,7 @@ Public Class TextTagComp
         CacheSlots = Nothing
         CacheSlotPaths = Nothing
         CacheSlotBranchIndices = Nothing
+        CacheTreeKeys = Nothing
         CloseTagTextBoxIfAny()
         Me.ClearData()
         Me.ExpireSolution(True)
@@ -716,13 +721,13 @@ Public Class TextTagComp
     ''' <summary>Index within the input branch at SlotPaths (parallel to Slots).</summary>
     Friend SlotBranchIndices As New List(Of Integer)
 
-    ''' <summary>Keep texts when upstream locations change (on by default).</summary>
+    ''' <summary>List cache: keep texts by tree path / list index when locations move (on by default). With ProximityCache: mixed mode.</summary>
     Public PreserveChanges As Boolean = True
 
-    ''' <summary>When the list changes, re-attach texts to the nearest cached location instead of the list index. Takes precedence over PreserveChanges.</summary>
+    ''' <summary>Proximity cache: remap by nearest cached location when the list/tree structure changes. Save-shifted is always on with this flag.</summary>
     Public ProximityCache As Boolean = False
 
-    ''' <summary>When proximity cache is on, remember text for anchors that leave the list and restore when they return.</summary>
+    ''' <summary>Always mirrors ProximityCache (culled anchors banked/restored). Kept for serialization / undo compatibility.</summary>
     Public SaveShifted As Boolean = False
 
     ''' <summary>When true, viewport interaction requires the component to be selected on the canvas.</summary>
@@ -747,10 +752,14 @@ Public Class TextTagComp
     Private CacheSlotPaths As List(Of GH_Path) = Nothing
     Private CacheSlotBranchIndices As List(Of Integer) = Nothing
 
+    ''' <summary>Stable tree-structure fingerprint (path + branch index per slot), updated after every cache write including proximity remaps.</summary>
+    Private CacheTreeKeys As List(Of String) = Nothing
+
     ''' <summary>Text saved for anchors that left the input list (Save shifted).</summary>
     Friend ShiftedTextEntries As New List(Of ShiftedTextEntry)
 
     Friend TextHeight As Double = 1.0R
+    Friend FontFace As String = String.Empty
     Friend TagColour As Color = Color.Black
 
     Friend Function TextHeightForIndex(index As Integer) As Double
@@ -760,6 +769,19 @@ Public Class TextTagComp
         End If
         Return TextHeight
     End Function
+
+    Friend Function FontFaceForIndex(index As Integer) As String
+        If SlotSettings IsNot Nothing AndAlso index >= 0 AndAlso index < SlotSettings.Length Then
+            Dim f As String = SlotSettings(index).FontFace
+            If Not String.IsNullOrWhiteSpace(f) Then Return f.Trim()
+        End If
+        Return If(FontFace, String.Empty).Trim()
+    End Function
+
+    Private Shared Sub ApplyFontToText3d(t As Text3d, fontFace As String)
+        If t Is Nothing OrElse String.IsNullOrWhiteSpace(fontFace) Then Return
+        t.FontFace = fontFace.Trim()
+    End Sub
 
     Friend Function TagColourForIndex(index As Integer) As Color
         If SlotSettings IsNot Nothing AndAlso index >= 0 AndAlso index < SlotSettings.Length AndAlso SlotSettings(index).HasCustomColour Then
@@ -791,6 +813,11 @@ Public Class TextTagComp
 
     Friend TagMouse As TextTagMouse
     Friend TagTextBox As FormTextTagBox = Nothing
+    Friend HoverIndex As Integer = -1
+    ''' <summary>Viewport text scale while a tag is hovered.</summary>
+    Private Const HoverTextScale As Double = 1.15R
+    ''' <summary>Pixel pick radius around an empty tag anchor dot.</summary>
+    Friend Const TagPickRadiusPx As Double = 14.0R
     ''' <summary>Slot index currently being edited in the floating text box (-1 = none).</summary>
     Friend EditIndex As Integer = -1
 
@@ -804,7 +831,7 @@ Public Class TextTagComp
         TextUserEdited = New List(Of Boolean)(newEdited)
         PreserveChanges = newPreserve
         ProximityCache = newProximity
-        SaveShifted = newSaveShifted
+        SaveShifted = newProximity
         ShiftedTextEntries = CloneShiftedTextList(newShifted)
         HorizontalAlign = newHAlign
         VerticalAlign = newVAlign
@@ -868,12 +895,30 @@ Public Class TextTagComp
         Dim want As Boolean =
             selectionOk AndAlso
             Not Me.Locked AndAlso
-            Not Me.Hidden AndAlso
+            ViewportPreview.IsEffectivelyPreviewed(Me) AndAlso
             Slots.Count > 0
         If TagMouse IsNot Nothing Then
             If TagMouse.Enabled <> want Then TagMouse.Enabled = want
+            TagMouse.SetHoverPollActive(want)
         End If
         If Not want Then CloseTagTextBoxIfAny()
+        If Not want AndAlso HoverIndex >= 0 Then
+            HoverIndex = -1
+            Try
+                Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
+            Catch
+            End Try
+        End If
+    End Sub
+
+    Friend Sub SetHoverIndex(index As Integer)
+        If index < -1 Then index = -1
+        If HoverIndex = index Then Return
+        HoverIndex = index
+        Try
+            Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
+        Catch
+        End Try
     End Sub
 
 #End Region
@@ -899,18 +944,82 @@ Public Class TextTagComp
     Private Shared Function PathsEqual(a As GH_Path, b As GH_Path) As Boolean
         If a Is Nothing AndAlso b Is Nothing Then Return True
         If a Is Nothing OrElse b Is Nothing Then Return False
-        Return a.Equals(b)
+        If a.Length <> b.Length Then Return False
+        For i As Integer = 0 To a.Length - 1
+            If a(i) <> b(i) Then Return False
+        Next
+        Return True
     End Function
+
+    Private Shared Function MakeTreeKey(path As GH_Path, branchIndex As Integer) As String
+        If path Is Nothing Then Return "#" & branchIndex.ToString()
+        Return path.ToString() & "#" & branchIndex.ToString()
+    End Function
+
+    Private Shared Function BuildTreeKeys(paths As List(Of GH_Path), branch As List(Of Integer)) As List(Of String)
+        If paths Is Nothing OrElse branch Is Nothing Then Return New List(Of String)
+        Dim n As Integer = Math.Min(paths.Count, branch.Count)
+        Dim keys As New List(Of String)(n)
+        For i As Integer = 0 To n - 1
+            keys.Add(MakeTreeKey(paths(i), branch(i)))
+        Next
+        Return keys
+    End Function
+
+    Private Shared Function TreeKeysEqual(a As List(Of String), b As List(Of String)) As Boolean
+        If a Is Nothing OrElse b Is Nothing Then Return False
+        If a.Count <> b.Count Then Return False
+        For i As Integer = 0 To a.Count - 1
+            If Not String.Equals(a(i), b(i), StringComparison.Ordinal) Then Return False
+        Next
+        Return True
+    End Function
+
+    Private Shared Function ClonePathList(paths As List(Of GH_Path)) As List(Of GH_Path)
+        If paths Is Nothing Then Return New List(Of GH_Path)
+        Dim dst As New List(Of GH_Path)(paths.Count)
+        For Each p As GH_Path In paths
+            dst.Add(If(p Is Nothing, Nothing, New GH_Path(p)))
+        Next
+        Return dst
+    End Function
+
+    Private Sub StoreLocationCache(slots As List(Of TextTagSlot), paths As List(Of GH_Path), branch As List(Of Integer))
+        CacheSlots = CloneSlotList(slots)
+        CacheSlotPaths = ClonePathList(paths)
+        CacheSlotBranchIndices = If(branch Is Nothing, New List(Of Integer), New List(Of Integer)(branch))
+        CacheTreeKeys = BuildTreeKeys(CacheSlotPaths, CacheSlotBranchIndices)
+    End Sub
+
+    Private Sub ProtectNonEmptyTextsAsEdited()
+        While TextUserEdited.Count < Texts.Count
+            TextUserEdited.Add(False)
+        End While
+        For i As Integer = 0 To Texts.Count - 1
+            If Not String.IsNullOrEmpty(Texts(i)) Then TextUserEdited(i) = True
+        Next
+    End Sub
 
     Private Shared Function SlotMetadataEqual(aPaths As List(Of GH_Path), aBranch As List(Of Integer),
                                               bPaths As List(Of GH_Path), bBranch As List(Of Integer)) As Boolean
-        If aPaths Is Nothing OrElse bPaths Is Nothing OrElse aBranch Is Nothing OrElse bBranch Is Nothing Then Return False
-        If aPaths.Count <> bPaths.Count OrElse aPaths.Count <> aBranch.Count OrElse bPaths.Count <> bBranch.Count Then Return False
-        For i As Integer = 0 To aPaths.Count - 1
-            If Not PathsEqual(aPaths(i), bPaths(i)) Then Return False
-            If aBranch(i) <> bBranch(i) Then Return False
+        Return TreeKeysEqual(BuildTreeKeys(aPaths, aBranch), BuildTreeKeys(bPaths, bBranch))
+    End Function
+
+    Private Shared Function SlotLocations(slots As List(Of TextTagSlot)) As List(Of Point3d)
+        Dim pts As New List(Of Point3d)
+        If slots Is Nothing Then Return pts
+        For Each s As TextTagSlot In slots
+            pts.Add(If(s.Location.IsValid, s.Location, Point3d.Unset))
         Next
-        Return True
+        Return pts
+    End Function
+
+    ''' <summary>True when proximity matching agrees with list indices (or finds no matches — far moves).</summary>
+    Private Shared Function PreferListKeepByProximityIdentity(oldSlots As List(Of TextTagSlot), oldPaths As List(Of GH_Path), oldBranch As List(Of Integer),
+                                                              newSlots As List(Of TextTagSlot), newPaths As List(Of GH_Path), newBranch As List(Of Integer)) As Boolean
+        Dim slotMap As Integer() = ProximityMatching.BuildCenterSlotMap(
+            SlotLocations(oldSlots), SlotLocations(newSlots), oldPaths, oldBranch, newPaths, newBranch, requireMatchingPaths:=False)
+        Return ProximityMatching.SlotMapIsIndexIdentity(slotMap)
     End Function
 
     Private Shared Function SlotsChanged(oldSlots As List(Of TextTagSlot), oldPaths As List(Of GH_Path), oldBranch As List(Of Integer),
@@ -1070,7 +1179,8 @@ Public Class TextTagComp
         End If
     End Sub
 
-    ''' <summary>Path-aware proximity remap: same-index pass then greedy nearest within tolerance.</summary>
+    ''' <summary>Path-aware proximity remap: same-index pass then greedy nearest within tolerance.
+    ''' When the tree address sequence is unchanged, keeps values by list index even if locations moved (list-cache identity).</summary>
     Private Shared Sub RemapTextsByProximity(oldSlots As List(Of TextTagSlot), oldPaths As List(Of GH_Path), oldBranch As List(Of Integer),
                                              oldTexts As List(Of String), oldEdited As List(Of Boolean),
                                              newSlots As List(Of TextTagSlot), newPaths As List(Of GH_Path), newBranch As List(Of Integer),
@@ -1334,6 +1444,41 @@ Public Class TextTagComp
             End Sub)
     End Sub
 
+    Private Sub MapStringTreeToTagSlots(DA As IGH_DataAccess, nick As String, locData As GH_Structure(Of IGH_GeometricGoo),
+                                        apply As Action(Of Integer, String))
+        If SlotSettings Is Nothing Then Return
+        Dim ix As Integer = FindInputIndexByNick(nick)
+        If ix < 0 OrElse Params.Input(ix).SourceCount = 0 Then Return
+        Dim tree As New GH_Structure(Of GH_String)
+        If Not DA.GetDataTree(ix, tree) Then Return
+
+        Dim broadcast As String = String.Empty
+        Dim useBroadcast As Boolean = False
+        If tree.DataCount = 1 Then
+            useBroadcast = True
+            Dim gs As GH_String = tree.AllData(True).FirstOrDefault()
+            If gs IsNot Nothing Then broadcast = If(gs.Value, String.Empty)
+        End If
+
+        ForEachValidLocationSlot(locData,
+            Sub(flat As Integer, path As GH_Path, j As Integer)
+                If flat >= SlotSettings.Length Then Return
+                Dim v As String = String.Empty
+                Dim hasV As Boolean = False
+                If useBroadcast Then
+                    v = broadcast
+                    hasV = True
+                ElseIf tree.PathExists(path) Then
+                    Dim valueBranch As IList(Of GH_String) = tree.Branch(path)
+                    If valueBranch IsNot Nothing AndAlso j < valueBranch.Count AndAlso valueBranch(j) IsNot Nothing Then
+                        v = If(valueBranch(j).Value, String.Empty)
+                        hasV = True
+                    End If
+                End If
+                If hasV Then apply(flat, v)
+            End Sub)
+    End Sub
+
     Private Sub MapColourTreeToTagSlots(DA As IGH_DataAccess, locData As GH_Structure(Of IGH_GeometricGoo))
         If SlotSettings Is Nothing Then Return
         Dim ix As Integer = FindInputIndexByNick("C")
@@ -1418,6 +1563,7 @@ Public Class TextTagComp
             Dim s As TextTagSlotSettings
             s.Active = True
             s.TextHeight = TextHeight
+            s.FontFace = FontFace
             s.TagColour = TagColour
             s.HasCustomColour = False
             s.HorizontalAlign = HorizontalAlign
@@ -1437,6 +1583,12 @@ Public Class TextTagComp
         End If
         If HasZuiInput(ZuiOptionalKind.Colour) Then
             MapColourTreeToTagSlots(DA, locData)
+        End If
+        If HasZuiInput(ZuiOptionalKind.Font) Then
+            MapStringTreeToTagSlots(DA, "Fn", locData,
+                Sub(i, v)
+                    If Not String.IsNullOrWhiteSpace(v) Then SlotSettings(i).FontFace = v.Trim()
+                End Sub)
         End If
         If HasZuiInput(ZuiOptionalKind.JustifyMultiline) Then
             MapBoolTreeToTagSlots(DA, "Jl", locData, JustifyMultilineLines, Sub(i, v) SlotSettings(i).JustifyMultilineLines = v)
@@ -1488,6 +1640,7 @@ Public Class TextTagComp
             CacheSlots = Nothing
             CacheSlotPaths = Nothing
             CacheSlotBranchIndices = Nothing
+            CacheTreeKeys = Nothing
             SyncMouse()
             Exit Sub
         End If
@@ -1528,15 +1681,22 @@ Public Class TextTagComp
             End If
         End If
 
-        If CacheSlots Is Nothing Then
-            CacheSlots = CloneSlotList(newSlots)
-            CacheSlotPaths = New List(Of GH_Path)(newPaths)
-            CacheSlotBranchIndices = New List(Of Integer)(newBranchIndices)
-            If ProximityCache AndAlso SaveShifted Then
+        If CacheSlots Is Nothing OrElse CacheTreeKeys Is Nothing Then
+            StoreLocationCache(newSlots, newPaths, newBranchIndices)
+            If ProximityCache Then
                 ApplyShiftedTexts(newSlots, Texts, TextUserEdited)
             End If
         ElseIf SlotsChanged(CacheSlots, CacheSlotPaths, CacheSlotBranchIndices, newSlots, newPaths, newBranchIndices) Then
-            If ProximityCache Then
+            Dim newTreeKeys As List(Of String) = BuildTreeKeys(newPaths, newBranchIndices)
+            Dim treeChanged As Boolean = Not TreeKeysEqual(CacheTreeKeys, newTreeKeys)
+            Dim preferIndexKeep As Boolean = PreserveChanges AndAlso Not treeChanged AndAlso
+                (Not ProximityCache OrElse PreferListKeepByProximityIdentity(CacheSlots, CacheSlotPaths, CacheSlotBranchIndices, newSlots, newPaths, newBranchIndices))
+
+            If preferIndexKeep Then
+                ' List cache: same tree addresses and not a wrap-shift/reorder — keep texts; refresh centroids below.
+                ProtectNonEmptyTextsAsEdited()
+            ElseIf ProximityCache Then
+                ' Proximity (+ save-shifted): tree changes, wrap-shifts, culls, grafts.
                 Dim prevTexts As New List(Of String)(Texts)
                 Dim prevEdited As New List(Of Boolean)(TextUserEdited)
                 Dim remappedTexts As New List(Of String)
@@ -1545,18 +1705,16 @@ Public Class TextTagComp
                                       newSlots, newPaths, newBranchIndices, remappedTexts, remappedEdited)
                 Texts = remappedTexts
                 TextUserEdited = remappedEdited
-                If SaveShifted Then
-                    RememberShiftedTexts(CacheSlots, prevTexts, prevEdited, newSlots)
-                    ApplyShiftedTexts(newSlots, Texts, TextUserEdited)
-                End If
+                RememberShiftedTexts(CacheSlots, prevTexts, prevEdited, newSlots)
+                ApplyShiftedTexts(newSlots, Texts, TextUserEdited)
+                ProtectNonEmptyTextsAsEdited()
             ElseIf Not PreserveChanges Then
                 Texts.Clear()
                 TextUserEdited.Clear()
             End If
-            CacheSlots = CloneSlotList(newSlots)
-            CacheSlotPaths = New List(Of GH_Path)(newPaths)
-            CacheSlotBranchIndices = New List(Of Integer)(newBranchIndices)
-        ElseIf ProximityCache AndAlso SaveShifted Then
+            ' Always refresh centroids + remembered tree structure after any change (including post-proximity).
+            StoreLocationCache(newSlots, newPaths, newBranchIndices)
+        ElseIf ProximityCache Then
             ApplyShiftedTexts(newSlots, Texts, TextUserEdited)
         End If
 
@@ -1618,10 +1776,11 @@ Public Class TextTagComp
         Next
     End Sub
 
-    Private Shared Function MeasureTextLine(line As String, basePlane As Plane, height As Double) As TextLineMetrics
+    Private Shared Function MeasureTextLine(line As String, basePlane As Plane, height As Double, fontFace As String) As TextLineMetrics
         Dim result As New TextLineMetrics With {.Width = 0, .Height = height * 1.2R}
         If String.IsNullOrEmpty(line) Then Return result
         Using t As New Text3d(line, basePlane, height)
+            ApplyFontToText3d(t, fontFace)
             t.HorizontalAlignment = Rhino.DocObjects.TextHorizontalAlignment.Left
             t.VerticalAlignment = Rhino.DocObjects.TextVerticalAlignment.Top
             Dim bb As BoundingBox = t.BoundingBox
@@ -1676,11 +1835,12 @@ Public Class TextTagComp
         Return New Plane(origin, pl.XAxis, pl.YAxis)
     End Function
 
-    Private Shared Function MeasureTextBlockExtents(txt As String, pl As Plane, height As Double,
+    Private Shared Function MeasureTextBlockExtents(txt As String, pl As Plane, height As Double, fontFace As String,
                                                     ByRef minX As Double, ByRef maxX As Double,
                                                     ByRef minY As Double, ByRef maxY As Double) As Boolean
         minX = 0 : maxX = 0 : minY = 0 : maxY = 0
         Using t As New Text3d(txt, pl, height)
+            ApplyFontToText3d(t, fontFace)
             t.HorizontalAlignment = Rhino.DocObjects.TextHorizontalAlignment.Left
             t.VerticalAlignment = Rhino.DocObjects.TextVerticalAlignment.Top
             Dim bb As BoundingBox = t.BoundingBox
@@ -1691,28 +1851,32 @@ Public Class TextTagComp
     End Function
 
     Private Sub DrawTagTextBlock(display As Rhino.Display.DisplayPipeline, txt As String, pl As Plane, col As Color,
-                                 height As Double, hAlign As Rhino.DocObjects.TextHorizontalAlignment,
+                                 height As Double, fontFace As String,
+                                 hAlign As Rhino.DocObjects.TextHorizontalAlignment,
                                  vAlign As Rhino.DocObjects.TextVerticalAlignment)
         Dim minX, maxX, minY, maxY As Double
-        If Not MeasureTextBlockExtents(txt, pl, height, minX, maxX, minY, maxY) Then Return
+        If Not MeasureTextBlockExtents(txt, pl, height, fontFace, minX, maxX, minY, maxY) Then Return
         Dim drawPl As Plane = PlaneForBlockAnchor(pl, minX, maxX, minY, maxY, hAlign, vAlign)
         Using t3 As New Text3d(txt, drawPl, height)
+            ApplyFontToText3d(t3, fontFace)
             t3.HorizontalAlignment = Rhino.DocObjects.TextHorizontalAlignment.Left
             t3.VerticalAlignment = Rhino.DocObjects.TextVerticalAlignment.Top
             display.Draw3dText(t3, col)
         End Using
     End Sub
 
-    Private Sub DrawTagText(display As Rhino.Display.DisplayPipeline, txt As String, pl As Plane, col As Color, index As Integer)
+    Private Sub DrawTagText(display As Rhino.Display.DisplayPipeline, txt As String, pl As Plane, col As Color, index As Integer,
+                            Optional heightScale As Double = 1.0R)
         If String.IsNullOrEmpty(txt) Then Return
 
-        Dim height As Double = TextHeightForIndex(index)
+        Dim height As Double = TextHeightForIndex(index) * Math.Max(0.01R, heightScale)
+        Dim fontFace As String = FontFaceForIndex(index)
         Dim hAlign As Rhino.DocObjects.TextHorizontalAlignment = HorizontalAlignForIndex(index)
         Dim vAlign As Rhino.DocObjects.TextVerticalAlignment = VerticalAlignForIndex(index)
         Dim justifyLines As Boolean = JustifyMultilineForIndex(index)
 
         If Not justifyLines OrElse Not TextHasMultipleLines(txt) Then
-            DrawTagTextBlock(display, txt, pl, col, height, hAlign, vAlign)
+            DrawTagTextBlock(display, txt, pl, col, height, fontFace, hAlign, vAlign)
             Return
         End If
 
@@ -1720,7 +1884,7 @@ Public Class TextTagComp
         If lines.Length = 0 Then Return
 
         Dim minX, maxX, minY, maxY As Double
-        If Not MeasureTextBlockExtents(txt, pl, height, minX, maxX, minY, maxY) Then Return
+        If Not MeasureTextBlockExtents(txt, pl, height, fontFace, minX, maxX, minY, maxY) Then Return
         Dim anchorX As Double = BlockAnchorLocalX(minX, maxX, hAlign)
         Dim anchorY As Double = BlockAnchorLocalY(minY, maxY, vAlign)
         Dim blockWidth As Double = Math.Max(0, maxX - minX)
@@ -1728,7 +1892,7 @@ Public Class TextTagComp
         Dim widths(lines.Length - 1) As Double
         Dim lineStep As Double = height * 1.2R
         For li As Integer = 0 To lines.Length - 1
-            Dim m As TextLineMetrics = MeasureTextLine(lines(li), pl, height)
+            Dim m As TextLineMetrics = MeasureTextLine(lines(li), pl, height, fontFace)
             widths(li) = m.Width
             lineStep = Math.Max(lineStep, m.Height)
         Next
@@ -1740,6 +1904,7 @@ Public Class TextTagComp
             Dim lineOrigin As Point3d = pl.Origin + pl.XAxis * (lineX - anchorX) + pl.YAxis * (lineY - anchorY)
             Dim linePl As New Plane(lineOrigin, pl.XAxis, pl.YAxis)
             Using tLine As New Text3d(lines(li), linePl, height)
+                ApplyFontToText3d(tLine, fontFace)
                 tLine.HorizontalAlignment = Rhino.DocObjects.TextHorizontalAlignment.Left
                 tLine.VerticalAlignment = Rhino.DocObjects.TextVerticalAlignment.Top
                 display.Draw3dText(tLine, col)
@@ -1747,8 +1912,88 @@ Public Class TextTagComp
         Next
     End Sub
 
+    Friend Function PlaneForTagViewport(index As Integer, vp As RhinoViewport) As Plane
+        Dim s As TextTagSlot = Slots(index)
+        If s.HasPlane Then Return s.Plane
+        Return New Plane(s.Location, vp.CameraX, vp.CameraY)
+    End Function
+
+    Friend Function TryGetTagScreenRect(vp As RhinoViewport, index As Integer, ByRef screenRect As RectangleF) As Boolean
+        screenRect = RectangleF.Empty
+        If vp Is Nothing OrElse index < 0 OrElse index >= Slots.Count Then Return False
+        Dim s As TextTagSlot = Slots(index)
+        If Not s.Location.IsValid Then Return False
+        Dim txt As String = If(index < Texts.Count, Texts(index), String.Empty)
+        Const padPx As Single = 3.0F
+
+        If String.IsNullOrEmpty(txt) Then
+            If Not vp.IsVisible(s.Location) Then Return False
+            Dim spt As Point2d = vp.WorldToClient(s.Location)
+            Dim r As Single = CSng(TagPickRadiusPx)
+            screenRect = New RectangleF(CSng(spt.X) - r, CSng(spt.Y) - r, r * 2.0F, r * 2.0F)
+            Return True
+        End If
+
+        Dim pl As Plane = PlaneForTagViewport(index, vp)
+        Dim height As Double = TextHeightForIndex(index)
+        Dim fontFace As String = FontFaceForIndex(index)
+        Dim minX, maxX, minY, maxY As Double
+        If Not MeasureTextBlockExtents(txt, pl, height, fontFace, minX, maxX, minY, maxY) Then Return False
+
+        Dim hAlign As Rhino.DocObjects.TextHorizontalAlignment = HorizontalAlignForIndex(index)
+        Dim vAlign As Rhino.DocObjects.TextVerticalAlignment = VerticalAlignForIndex(index)
+        Dim ax As Double = BlockAnchorLocalX(minX, maxX, hAlign)
+        Dim ay As Double = BlockAnchorLocalY(minY, maxY, vAlign)
+
+        Dim worldCorners() As Point3d = {
+            pl.Origin + pl.XAxis * (minX - ax) + pl.YAxis * (minY - ay),
+            pl.Origin + pl.XAxis * (maxX - ax) + pl.YAxis * (minY - ay),
+            pl.Origin + pl.XAxis * (maxX - ax) + pl.YAxis * (maxY - ay),
+            pl.Origin + pl.XAxis * (minX - ax) + pl.YAxis * (maxY - ay)
+        }
+
+        Dim minSX As Double = Double.PositiveInfinity
+        Dim minSY As Double = Double.PositiveInfinity
+        Dim maxSX As Double = Double.NegativeInfinity
+        Dim maxSY As Double = Double.NegativeInfinity
+        For Each wp As Point3d In worldCorners
+            Dim sc As Point2d = vp.WorldToClient(wp)
+            minSX = Math.Min(minSX, sc.X)
+            minSY = Math.Min(minSY, sc.Y)
+            maxSX = Math.Max(maxSX, sc.X)
+            maxSY = Math.Max(maxSY, sc.Y)
+        Next
+
+        screenRect = New RectangleF(CSng(minSX) - padPx, CSng(minSY) - padPx,
+                                    CSng(maxSX - minSX) + padPx * 2.0F, CSng(maxSY - minSY) + padPx * 2.0F)
+        Return screenRect.Width > 0 AndAlso screenRect.Height > 0
+    End Function
+
+    Friend Function PickTagIndexAtViewport(vp As RhinoViewport, viewportPt As Drawing.Point) As Integer
+        If vp Is Nothing Then Return -1
+        Dim hit As Integer = -1
+        Dim bestDist As Double = Double.PositiveInfinity
+        For i As Integer = 0 To Slots.Count - 1
+            If Not IsTagActiveForViewport(i) Then Continue For
+            Dim rect As RectangleF
+            If Not TryGetTagScreenRect(vp, i, rect) Then Continue For
+            If Not rect.Contains(CSng(viewportPt.X), CSng(viewportPt.Y)) Then Continue For
+            Dim cx As Double = CDbl(rect.X) + CDbl(rect.Width) * 0.5R
+            Dim cy As Double = CDbl(rect.Y) + CDbl(rect.Height) * 0.5R
+            Dim dx As Double = cx - CDbl(viewportPt.X)
+            Dim dy As Double = cy - CDbl(viewportPt.Y)
+            Dim d2 As Double = dx * dx + dy * dy
+            If d2 < bestDist Then
+                bestDist = d2
+                hit = i
+            End If
+        Next
+        Return hit
+    End Function
+
     Public Overrides Sub DrawViewportWires(args As IGH_PreviewArgs)
         If Slots.Count = 0 Then Return
+        SyncMouse()
 
         For i As Integer = 0 To Slots.Count - 1
             Dim s As TextTagSlot = Slots(i)
@@ -1759,8 +2004,12 @@ Public Class TextTagComp
                 col = args.WireColour_Selected
             End If
 
+            Dim isHover As Boolean = (i = HoverIndex)
+            If isHover Then col = Color.Black
+
             If String.IsNullOrEmpty(txt) Then
-                args.Display.DrawPoint(s.Location, PointStyle.RoundSimple, 5, col)
+                Dim ptSize As Integer = If(isHover, 8, 5)
+                args.Display.DrawPoint(s.Location, PointStyle.RoundSimple, ptSize, col)
             Else
                 Dim pl As Plane
                 If s.HasPlane Then
@@ -1769,7 +2018,7 @@ Public Class TextTagComp
                     ' Camera-facing text for point input.
                     pl = New Plane(s.Location, args.Viewport.CameraX, args.Viewport.CameraY)
                 End If
-                DrawTagText(args.Display, txt, pl, col, i)
+                DrawTagText(args.Display, txt, pl, col, i, If(isHover, HoverTextScale, 1.0R))
             End If
         Next
     End Sub
@@ -1798,7 +2047,7 @@ Public Class TextTagComp
     Public Overrides Function Write(writer As GH_IO.Serialization.GH_IWriter) As Boolean
         writer.SetBoolean("TT_Preserve", PreserveChanges)
         writer.SetBoolean("TT_Proximity", ProximityCache)
-        writer.SetBoolean("TT_SaveShifted", Me.SaveShifted)
+        writer.SetBoolean("TT_SaveShifted", ProximityCache)
         writer.SetInt32("TT_HAlign", CInt(HorizontalAlign))
         writer.SetInt32("TT_VAlign", CInt(VerticalAlign))
         writer.SetBoolean("TT_JustifyLines", JustifyMultilineLines)
@@ -1835,11 +2084,10 @@ Public Class TextTagComp
         Dim prox As Boolean = False
         reader.TryGetBoolean("TT_Proximity", prox)
         ProximityCache = prox
-
-        Dim loadedSaveShifted As Boolean = False
-        If reader.TryGetBoolean("TT_SaveShifted", loadedSaveShifted) Then
-            Me.SaveShifted = loadedSaveShifted
-        End If
+        ' Save-shifted is always on with proximity; legacy TT_SaveShifted is ignored.
+        SaveShifted = prox
+        Dim discardSs As Boolean = False
+        reader.TryGetBoolean("TT_SaveShifted", discardSs)
 
         Dim hAlign As Integer = CInt(Rhino.DocObjects.TextHorizontalAlignment.Center)
         If reader.TryGetInt32("TT_HAlign", hAlign) Then
@@ -2015,13 +2263,115 @@ Public Class TextTagMouse
         Comp = owner
     End Sub
 
-    ''' <summary>Pixel pick radius around the anchor (dot or text insertion point).</summary>
-    Private Const PickRadiusPx As Double = 14.0R
     ''' <summary>Beyond this many pixels the gesture counts as a drag (e.g. moving the underlying point), not a click.</summary>
     Private Const ClickSlopPx As Double = 4.0R
 
     Private _pendingHit As Integer = -1
     Private _downViewport As Drawing.Point
+    Private _hoverTimer As Timer
+    Private _hoverPollActive As Boolean
+    Private _hookedCanvas As GH_Canvas
+
+    Friend Sub SetHoverPollActive(active As Boolean)
+        _hoverPollActive = active AndAlso Me.Enabled
+        If _hoverPollActive Then
+            EnsureHoverTimer()
+            _hoverTimer.Enabled = True
+            AttachGhCanvasHoverHook()
+            PollHoverFromGlobalCursor()
+        Else
+            If _hoverTimer IsNot Nothing Then _hoverTimer.Enabled = False
+            DetachGhCanvasHoverHook()
+            If Comp IsNot Nothing Then Comp.SetHoverIndex(-1)
+        End If
+    End Sub
+
+    Private Sub EnsureHoverTimer()
+        If _hoverTimer IsNot Nothing Then Return
+        _hoverTimer = New Timer With {.Interval = 40}
+        AddHandler _hoverTimer.Tick, AddressOf OnHoverPollTick
+    End Sub
+
+    Private Sub OnHoverPollTick(sender As Object, e As EventArgs)
+        PollHoverFromGlobalCursor()
+    End Sub
+
+    Private Sub AttachGhCanvasHoverHook()
+        DetachGhCanvasHoverHook()
+        Dim cv As GH_Canvas = TryResolveGrasshopperCanvas()
+        If cv Is Nothing Then Return
+        _hookedCanvas = cv
+        AddHandler _hookedCanvas.MouseMove, AddressOf GhCanvas_MouseMoveHover
+    End Sub
+
+    Private Sub DetachGhCanvasHoverHook()
+        If _hookedCanvas Is Nothing Then Return
+        RemoveHandler _hookedCanvas.MouseMove, AddressOf GhCanvas_MouseMoveHover
+        _hookedCanvas = Nothing
+    End Sub
+
+    Private Sub GhCanvas_MouseMoveHover(sender As Object, e As MouseEventArgs)
+        PollHoverFromGlobalCursor()
+    End Sub
+
+    Private Shared Function TryResolveGrasshopperCanvas() As GH_Canvas
+        Dim cv As GH_Canvas = Grasshopper.Instances.ActiveCanvas
+        If cv IsNot Nothing Then Return cv
+        Dim ed As Control = TryCast(Grasshopper.Instances.DocumentEditor, Control)
+        If ed Is Nothing Then Return Nothing
+        Return FindDescendantCanvas(ed)
+    End Function
+
+    Private Shared Function FindDescendantCanvas(root As Control) As GH_Canvas
+        Dim q As GH_Canvas = TryCast(root, GH_Canvas)
+        If q IsNot Nothing Then Return q
+        For Each ch As Control In root.Controls
+            Dim n As GH_Canvas = FindDescendantCanvas(ch)
+            If n IsNot Nothing Then Return n
+        Next
+        Return Nothing
+    End Function
+
+    Friend Sub PollHoverFromGlobalCursor()
+        If Not _hoverPollActive OrElse Comp Is Nothing OrElse _pendingHit >= 0 OrElse Comp.TagTextBox IsNot Nothing Then Return
+        Try
+            Dim screenPt As Drawing.Point = Control.MousePosition
+            Dim ghDoc As GH_Document = Comp.OnPingDocument()
+            Dim targetDoc As Rhino.RhinoDoc = If(ghDoc IsNot Nothing, ghDoc.RhinoDocument, Nothing)
+            If targetDoc Is Nothing Then targetDoc = Rhino.RhinoDoc.ActiveDoc
+            If targetDoc Is Nothing Then
+                Comp.SetHoverIndex(-1)
+                Return
+            End If
+
+            For Each view As Rhino.Display.RhinoView In targetDoc.Views
+                If view Is Nothing Then Continue For
+                If view.Document IsNot targetDoc Then Continue For
+                Dim rect As Drawing.Rectangle = view.ScreenRectangle
+                If rect.Width <= 0 OrElse rect.Height <= 0 Then Continue For
+                If Not rect.Contains(screenPt) Then Continue For
+                Dim clientPt As Drawing.Point = view.ScreenToClient(screenPt)
+                Dim vp As RhinoViewport = view.ActiveViewport
+                If vp Is Nothing Then Continue For
+                Comp.SetHoverIndex(Comp.PickTagIndexAtViewport(vp, clientPt))
+                Return
+            Next
+            Comp.SetHoverIndex(-1)
+        Catch
+        End Try
+    End Sub
+
+    Private Sub UpdateHoverFromViewport(e As Rhino.UI.MouseCallbackEventArgs)
+        If Comp Is Nothing OrElse e.View Is Nothing Then Return
+        Dim vp As RhinoViewport = e.View.ActiveViewport
+        If vp Is Nothing Then Return
+        Comp.SetHoverIndex(Comp.PickTagIndexAtViewport(vp, e.ViewportPoint))
+    End Sub
+
+    Private Sub ResumeHoverPoll()
+        If _hoverPollActive AndAlso _hoverTimer IsNot Nothing Then _hoverTimer.Enabled = True
+        PollHoverFromGlobalCursor()
+    End Sub
 
     Protected Overrides Sub OnMouseDown(e As Rhino.UI.MouseCallbackEventArgs)
         MyBase.OnMouseDown(e)
@@ -2036,43 +2386,43 @@ Public Class TextTagMouse
         Dim vp As RhinoViewport = e.View.ActiveViewport
         If vp Is Nothing Then Exit Sub
 
-        Dim hit As Integer = -1
-        Dim bestDist As Double = Double.PositiveInfinity
-        For i As Integer = 0 To Comp.Slots.Count - 1
-            If Not Comp.IsTagActiveForViewport(i) Then Continue For
-            Dim wpt As Point3d = Comp.Slots(i).Location
-            If Not vp.IsVisible(wpt) Then Continue For
-            Dim spt As Rhino.Geometry.Point2d = vp.WorldToClient(wpt)
-            Dim dx As Double = spt.X - CDbl(e.ViewportPoint.X)
-            Dim dy As Double = spt.Y - CDbl(e.ViewportPoint.Y)
-            Dim d2 As Double = dx * dx + dy * dy
-            If d2 <= PickRadiusPx * PickRadiusPx AndAlso d2 < bestDist Then
-                bestDist = d2
-                hit = i
-            End If
-        Next
+        Dim hit As Integer = Comp.PickTagIndexAtViewport(vp, e.ViewportPoint)
 
         If hit < 0 Then Exit Sub
 
-        ' Do not cancel the event: a drag must still reach Rhino so the underlying point can be moved.
-        ' The text box opens on mouse-up only if the cursor stayed within the click slop.
+        ' Swallow the press so Rhino does not start a crossing/window selection rectangle.
+        ' Drag past the click slop clears the pending edit so the move can reach Rhino (e.g. point drag).
         _pendingHit = hit
         _downViewport = e.ViewportPoint
+        If _hoverTimer IsNot Nothing Then _hoverTimer.Enabled = False
+        Comp.SetHoverIndex(hit)
+        e.Cancel = True
     End Sub
 
     Protected Overrides Sub OnMouseMove(e As Rhino.UI.MouseCallbackEventArgs)
         MyBase.OnMouseMove(e)
-        If _pendingHit < 0 Then Exit Sub
+        If _pendingHit < 0 Then
+            UpdateHoverFromViewport(e)
+            Exit Sub
+        End If
         Dim dx As Double = CDbl(e.ViewportPoint.X) - CDbl(_downViewport.X)
         Dim dy As Double = CDbl(e.ViewportPoint.Y) - CDbl(_downViewport.Y)
-        If (dx * dx + dy * dy) > (ClickSlopPx * ClickSlopPx) Then _pendingHit = -1
+        If (dx * dx + dy * dy) > (ClickSlopPx * ClickSlopPx) Then
+            _pendingHit = -1
+            ResumeHoverPoll()
+            Exit Sub
+        End If
+        e.Cancel = True
     End Sub
 
     Protected Overrides Sub OnMouseUp(e As Rhino.UI.MouseCallbackEventArgs)
         MyBase.OnMouseUp(e)
         Dim hit As Integer = _pendingHit
         _pendingHit = -1
-        If hit < 0 Then Exit Sub
+        If hit < 0 Then
+            ResumeHoverPoll()
+            Exit Sub
+        End If
         If Comp Is Nothing Then Exit Sub
         If e.Button <> MouseButtons.Left Then Exit Sub
         If hit >= Comp.Slots.Count Then Exit Sub
@@ -2080,6 +2430,11 @@ Public Class TextTagMouse
         Comp.EditIndex = hit
         Dim current As String = If(hit < Comp.Texts.Count, Comp.Texts(hit), String.Empty)
         Comp.TagTextBox = New FormTextTagBox(Control.MousePosition, Comp, hit, current)
+        Try
+            Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
+        Catch
+        End Try
+        ResumeHoverPoll()
         e.Cancel = True
     End Sub
 

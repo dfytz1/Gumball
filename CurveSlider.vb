@@ -35,7 +35,8 @@ Public Class CurveSliderComp
         PreserveChanges = 7
         ProximityCache = 8
         SaveShifted = 9
-        ClearCache = 10
+        PreserveDisplayValue = 10
+        ClearCache = 11
     End Enum
 
     ''' <summary>Optional outputs exposed via canvas ZUI (+) after P and t.</summary>
@@ -55,7 +56,7 @@ Public Class CurveSliderComp
         ZuiOptionalKind.LockUnselected,
         ZuiOptionalKind.PreserveChanges,
         ZuiOptionalKind.ProximityCache,
-        ZuiOptionalKind.SaveShifted,
+        ZuiOptionalKind.PreserveDisplayValue,
         ZuiOptionalKind.ClearCache
     }
 
@@ -136,6 +137,7 @@ Public Class CurveSliderComp
 
     Public Overrides Sub AddedToDocument(document As GH_Document)
         MyBase.AddedToDocument(document)
+        ViewportPreview.EnsureGrasshopperDocumentHooks(document)
         VariableParameterMaintenance()
     End Sub
 
@@ -147,11 +149,14 @@ Public Class CurveSliderComp
 
     Public Overrides Sub RemovedFromDocument(document As GH_Document)
         ShutDownInteraction()
+        ViewportPreview.ClearPreviewRhinoDoc(Me)
         MyBase.RemovedFromDocument(document)
     End Sub
 
     Public Overrides Sub MovedBetweenDocuments(oldDocument As GH_Document, newDocument As GH_Document)
+        If newDocument IsNot Nothing Then ViewportPreview.EnsureGrasshopperDocumentHooks(newDocument)
         ShutDownInteraction()
+        SyncViewportInteraction()
         MyBase.MovedBetweenDocuments(oldDocument, newDocument)
     End Sub
 
@@ -172,10 +177,9 @@ Public Class CurveSliderComp
 
     Protected Overrides Sub AfterSolveInstance()
         MyBase.AfterSolveInstance()
-        SyncMouse()
-        SyncLabelConduit()
+        SyncViewportInteraction()
         Try
-            Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
+            ViewportPreview.RedrawAllOpenRhinoDocuments()
         Catch
         End Try
     End Sub
@@ -206,15 +210,15 @@ Public Class CurveSliderComp
         Dim lockUnsel As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Lock unselected", AddressOf Menu_LockUnselected, True, MenuBoolChecked(LockUnselected, ZuiOptionalKind.LockUnselected))
         lockUnsel.ToolTipText = "When on, the slider can be dragged or edited only while this component is selected on the Grasshopper canvas."
 
-        Dim preserve As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Preserve changes", AddressOf Menu_PreserveChanges, True, MenuBoolChecked(PreserveChanges, ZuiOptionalKind.PreserveChanges))
-        preserve.ToolTipText = "Keep slider values (per item index) when upstream curves move or change."
+        Dim listCache As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "List cache", AddressOf Menu_PreserveChanges, True, MenuBoolChecked(PreserveChanges, ZuiOptionalKind.PreserveChanges))
+        listCache.ToolTipText = "Keep slider values by tree path / list index when curves move. With Proximity also on: keep by index for far moves; proximity remaps wrap-shifts, culls, grafts, and tree changes."
 
         Dim proximity As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Proximity cache", AddressOf Menu_ProximityCache, True, MenuBoolChecked(ProximityCache, ZuiOptionalKind.ProximityCache))
-        proximity.ToolTipText = "When the curve list changes, re-attach each slider to the nearest new curve by point location instead of the list index."
+        proximity.ToolTipText = "Re-attach sliders by nearest curve on wrap-shifts, culls, grafts, and other list/tree changes. Culled curves are always saved and restored if they return (save-shifted)."
 
-        Dim saveShiftedItem As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Save shifted", AddressOf Menu_SaveShifted, True, MenuBoolChecked(Me.SaveShifted, ZuiOptionalKind.SaveShifted))
-        saveShiftedItem.Enabled = MenuBoolChecked(ProximityCache, ZuiOptionalKind.ProximityCache)
-        saveShiftedItem.ToolTipText = "When proximity cache is on, remember slider values for curves that leave the list and restore them if the curve returns."
+        Dim keepDisplay As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Keep display value", AddressOf Menu_PreserveDisplayValue, True, MenuBoolChecked(PreserveDisplayValue, ZuiOptionalKind.PreserveDisplayValue))
+        keepDisplay.Enabled = PreserveDisplayValueAvailable()
+        keepDisplay.ToolTipText = "When Real values or Custom domain is on, keep the displayed number (length or domain value) when the curve changes — not normalized t. If the curve becomes too short, the value is clamped and restored when the curve grows again."
 
         Dim cc As Windows.Forms.ToolStripMenuItem = Menu_AppendItem(menu, "Clear cache", AddressOf Menu_ClearCache, True)
         cc.ToolTipText = "Reset all slider values to the curve midpoint."
@@ -282,7 +286,7 @@ Public Class CurveSliderComp
     End Sub
 
     Private Sub Menu_PreserveChanges()
-        RecordUndoEvent("Curve Slider Preserve", New CurveSliderUndo(Me))
+        RecordUndoEvent("Curve Slider List Cache", New CurveSliderUndo(Me))
         PreserveChanges = Not PreserveChanges
         Me.ExpireSolution(True)
     End Sub
@@ -290,13 +294,18 @@ Public Class CurveSliderComp
     Private Sub Menu_ProximityCache()
         RecordUndoEvent("Curve Slider Proximity", New CurveSliderUndo(Me))
         ProximityCache = Not ProximityCache
+        If ProximityCache Then SaveShifted = True
         Me.ExpireSolution(True)
     End Sub
 
-    Private Sub Menu_SaveShifted()
-        If Not MenuBoolChecked(ProximityCache, ZuiOptionalKind.ProximityCache) Then Return
-        RecordUndoEvent("Curve Slider Save Shifted", New CurveSliderUndo(Me))
-        SaveShifted = Not SaveShifted
+    Private Function PreserveDisplayValueAvailable() As Boolean
+        Return ShowRealValue OrElse CustomDomain OrElse HasZuiInput(ZuiOptionalKind.RealValues) OrElse HasZuiInput(ZuiOptionalKind.CustomDomain)
+    End Function
+
+    Private Sub Menu_PreserveDisplayValue()
+        If Not PreserveDisplayValueAvailable() Then Return
+        RecordUndoEvent("Curve Slider Keep Display Value", New CurveSliderUndo(Me))
+        PreserveDisplayValue = Not PreserveDisplayValue
         Me.ExpireSolution(True)
     End Sub
 
@@ -362,6 +371,7 @@ Public Class CurveSliderComp
             Case ZuiOptionalKind.PreserveChanges : Return "Pr"
             Case ZuiOptionalKind.ProximityCache : Return "Px"
             Case ZuiOptionalKind.SaveShifted : Return "Ss"
+            Case ZuiOptionalKind.PreserveDisplayValue : Return "Kv"
             Case ZuiOptionalKind.ClearCache : Return "Cc"
             Case Else : Return String.Empty
         End Select
@@ -478,14 +488,17 @@ Public Class CurveSliderComp
                 Return CreateBoolZuiParam("Lock unselected", "Lu",
                     "When true, viewport picking works only while this component is selected on the Grasshopper canvas. Overridden by Active when that input is present.")
             Case ZuiOptionalKind.PreserveChanges
-                Return CreateBoolZuiParam("Preserve changes", "Pr",
-                    "When true, keep slider values when upstream curves move or change.")
+                Return CreateBoolZuiParam("List cache", "Pr",
+                    "Keep slider values by tree path / list index when curves move. With Proximity: keep by index for far moves; proximity remaps wrap-shifts and tree changes.")
             Case ZuiOptionalKind.ProximityCache
                 Return CreateBoolZuiParam("Proximity cache", "Px",
-                    "When true, re-attach each slider to the nearest new curve when the curve list changes.")
+                    "Re-attach sliders by nearest curve on wrap-shifts, culls, grafts, and other list/tree changes. Culled curves are always saved and restored if they return.")
             Case ZuiOptionalKind.SaveShifted
                 Return CreateBoolZuiParam("Save shifted", "Ss",
-                    "When proximity cache is on, remember slider values for curves that leave the list and restore them if the curve returns.")
+                    "Legacy input; ignored. Save-shifted is always active when Proximity cache is on.")
+            Case ZuiOptionalKind.PreserveDisplayValue
+                Return CreateBoolZuiParam("Keep display value", "Kv",
+                    "When Real values or Custom domain is on, keep the displayed number when the curve changes (not normalized t). Clamped values are restored when the curve grows again.")
             Case ZuiOptionalKind.ClearCache
                 Return CreateBoolZuiParam("Clear cache", "Cc",
                     "Pulse true to reset all slider values to the starting position (rising edge only).")
@@ -598,7 +611,8 @@ Public Class CurveSliderComp
         ApplyBoolInput(DA, FindInputIndexByNick("Lu"), LockUnselected, True)
         ApplyBoolInput(DA, FindInputIndexByNick("Pr"), PreserveChanges, True)
         ApplyBoolInput(DA, FindInputIndexByNick("Px"), ProximityCache, False)
-        ApplyBoolInput(DA, FindInputIndexByNick("Ss"), SaveShifted, False)
+        If ProximityCache Then SaveShifted = True Else SaveShifted = False
+        ApplyBoolInput(DA, FindInputIndexByNick("Kv"), PreserveDisplayValue, False)
 
         Dim ccIx As Integer = FindInputIndexByNick("Cc")
         If ccIx >= 0 AndAlso Params.Input(ccIx).SourceCount > 0 Then
@@ -618,7 +632,11 @@ Public Class CurveSliderComp
         SliderParams.Clear()
         ParamUserEdited.Clear()
         ShiftedSliderEntries.Clear()
+        DesiredDisplayValues.Clear()
         CacheCurves = Nothing
+        CacheCurvePaths = Nothing
+        CacheCurveBranchIndices = Nothing
+        CacheTreeKeys = Nothing
         CloseSliderTextBoxIfAny()
     End Sub
 
@@ -645,6 +663,7 @@ Public Class CurveSliderComp
     End Function
 
     Private Function IsSelectionAllowedForViewport() As Boolean
+        If Not ViewportPreview.IsLinkedRhinoDocumentActive(Me) Then Return False
         If HasZuiInput(ZuiOptionalKind.Active) Then
             If Not IsActiveForViewport() Then Return False
         ElseIf Not IsActiveForViewport() Then
@@ -773,11 +792,18 @@ Public Class CurveSliderComp
     ''' <summary>Normalized slider parameter (0-1) per curve index (persisted in the GH file).</summary>
     Friend SliderParams As New List(Of Double)
 
+    ''' <summary>List cache: keep slider values by tree path / list index when curves move. With ProximityCache: mixed mode.</summary>
     Public PreserveChanges As Boolean = True
+    ''' <summary>Proximity cache: remap by nearest curve when list/tree structure changes. Save-shifted always on with this flag.</summary>
     Public ProximityCache As Boolean = False
+    ''' <summary>Always mirrors ProximityCache. Kept for serialization / undo compatibility.</summary>
     Public SaveShifted As Boolean = False
+    ''' <summary>Keep displayed value (real curve parameter or custom domain) when upstream curve geometry changes.</summary>
+    Public PreserveDisplayValue As Boolean = False
 
     Friend ShiftedSliderEntries As New List(Of ShiftedSliderEntry)
+    ''' <summary>Intended display value per curve when clamped by a shorter curve; NaN = none.</summary>
+    Friend DesiredDisplayValues As New List(Of Double)
     Friend ParamUserEdited As New List(Of Boolean)
     ''' <summary>When true, viewport interaction requires the component to be selected on the canvas.</summary>
     Public LockUnselected As Boolean = True
@@ -796,11 +822,16 @@ Public Class CurveSliderComp
     Friend Curves As New List(Of Curve)
     ''' <summary>Data tree path per curve (parallel to Curves).</summary>
     Friend CurvePaths As New List(Of GH_Path)
+    ''' <summary>Branch index within the path per curve (parallel to Curves).</summary>
+    Friend CurveBranchIndices As New List(Of Integer)
     ''' <summary>Evaluated slider points from the last solve (parallel to Curves).</summary>
     Friend Points As New List(Of Point3d)
 
     ''' <summary>Cached curves used to detect upstream changes.</summary>
     Private CacheCurves As List(Of Curve) = Nothing
+    Private CacheCurvePaths As List(Of GH_Path) = Nothing
+    Private CacheCurveBranchIndices As List(Of Integer) = Nothing
+    Private CacheTreeKeys As List(Of String) = Nothing
 
     Friend Function HasValidCustomIntervalForIndex(index As Integer) As Boolean
         If Not CustomDomain Then Return False
@@ -911,8 +942,22 @@ Public Class CurveSliderComp
     ''' <summary>Starting normalized params from the Sp input this solve (parallel to Curves).</summary>
     Friend StartingParams As New List(Of Double)
 
+    Private _previewRhinoDoc As Rhino.RhinoDoc = Nothing
+
+    Friend ReadOnly Property PreviewRhinoDoc As Rhino.RhinoDoc
+        Get
+            Return _previewRhinoDoc
+        End Get
+    End Property
+
+    Friend Sub SetPreviewRhinoDoc(doc As Rhino.RhinoDoc)
+        _previewRhinoDoc = doc
+    End Sub
+
     Friend SliderMouse As CurveSliderMouse
     Friend SliderTextBox As FormCurveSliderBox = Nothing
+    ''' <summary>Slider dot under the cursor (-1 = none).</summary>
+    Friend HoverIndex As Integer = -1
     Private ReadOnly _labelConduit As CurveSliderLabelConduit
     ''' <summary>Slot index currently being edited in the floating box (-1 = none).</summary>
     Friend EditIndex As Integer = -1
@@ -1248,16 +1293,127 @@ Public Class CurveSliderComp
         Return Math.Max(0.0R, Math.Min(1.0R, t))
     End Function
 
+    Friend Function UsesDisplayValuePreserve(index As Integer) As Boolean
+        If Not PreserveDisplayValue Then Return False
+        Return HasValidCustomIntervalForIndex(index) OrElse ShowRealValueForIndex(index)
+    End Function
+
+    Private Function DisplayValueFromCurve(index As Integer, crv As Curve, tNorm As Double) As Double
+        Dim t As Double = ClampNormalizedParam(tNorm)
+        If HasValidCustomIntervalForIndex(index) Then Return CustomIntervalForIndex(index).ParameterAt(t)
+        If ShowRealValueForIndex(index) AndAlso crv IsNot Nothing Then Return crv.Domain.ParameterAt(t)
+        Return t
+    End Function
+
+    Private Function NormalizedFromDisplayValueClamped(index As Integer, crv As Curve, value As Double, ByRef appliedValue As Double) As Double
+        Dim domMin As Double = 0.0R
+        Dim domMax As Double = 1.0R
+        If HasValidCustomIntervalForIndex(index) Then
+            Dim iv As Interval = CustomIntervalForIndex(index)
+            domMin = iv.Min
+            domMax = iv.Max
+        ElseIf ShowRealValueForIndex(index) AndAlso crv IsNot Nothing Then
+            domMin = crv.Domain.Min
+            domMax = crv.Domain.Max
+        End If
+        appliedValue = Math.Max(domMin, Math.Min(domMax, value))
+        Return StartingInputToNormalized(index, crv, appliedValue)
+    End Function
+
+    Private Sub EnsureDesiredDisplayValueCount(count As Integer)
+        While DesiredDisplayValues.Count < count
+            DesiredDisplayValues.Add(Double.NaN)
+        End While
+        If DesiredDisplayValues.Count > count Then
+            DesiredDisplayValues.RemoveRange(count, DesiredDisplayValues.Count - count)
+        End If
+    End Sub
+
+    Private Sub SetDesiredDisplayValue(index As Integer, value As Double)
+        EnsureDesiredDisplayValueCount(index + 1)
+        DesiredDisplayValues(index) = value
+    End Sub
+
+    Friend Sub UpdateDesiredDisplayValue(index As Integer)
+        If Not UsesDisplayValuePreserve(index) Then Return
+        SetDesiredDisplayValue(index, DisplayValue(index))
+    End Sub
+
+    Private Shared Function BuildIndexSlotMap(newCount As Integer, oldCount As Integer) As Integer()
+        If newCount <= 0 Then Return New Integer() {}
+        Dim map(newCount - 1) As Integer
+        For j As Integer = 0 To newCount - 1
+            map(j) = If(j < oldCount, j, -1)
+        Next
+        Return map
+    End Function
+
+    Private Sub RemapDesiredDisplayValuesBySlotMap(slotMap As Integer(), newCount As Integer)
+        Dim remapped As New List(Of Double)
+        For ni As Integer = 0 To newCount - 1
+            Dim desired As Double = Double.NaN
+            Dim oi As Integer = If(slotMap IsNot Nothing AndAlso ni < slotMap.Length, slotMap(ni), ni)
+            If oi >= 0 AndAlso oi < DesiredDisplayValues.Count AndAlso Not Double.IsNaN(DesiredDisplayValues(oi)) Then
+                desired = DesiredDisplayValues(oi)
+            End If
+            remapped.Add(desired)
+        Next
+        DesiredDisplayValues = remapped
+    End Sub
+
+    Private Sub ApplyPreserveDisplayValueAfterCurveChange(oldCurves As List(Of Curve), oldParams As List(Of Double), newCurves As List(Of Curve))
+        If Not PreserveDisplayValue OrElse oldCurves Is Nothing OrElse newCurves Is Nothing OrElse newCurves.Count = 0 Then Return
+
+        Dim slotMap As Integer()
+        If ProximityCache AndAlso oldCurves.Count > 0 Then
+            slotMap = ProximityMatching.BuildTransformSlotMap(
+                CurvesToGeometryArray(oldCurves), CurvesToGeometryArray(newCurves),
+                Nothing, Nothing, Nothing, Nothing, requireMatchingPaths:=False)
+        Else
+            slotMap = BuildIndexSlotMap(newCurves.Count, oldCurves.Count)
+        End If
+
+        RemapDesiredDisplayValuesBySlotMap(slotMap, newCurves.Count)
+        EnsureDesiredDisplayValueCount(newCurves.Count)
+
+        While SliderParams.Count < newCurves.Count
+            SliderParams.Add(InitialSliderParam(SliderParams.Count))
+        End While
+
+        For ni As Integer = 0 To newCurves.Count - 1
+            If Not UsesDisplayValuePreserve(ni) Then Continue For
+            Dim newCrv As Curve = newCurves(ni)
+            If newCrv Is Nothing Then Continue For
+
+            Dim oi As Integer = If(ni < slotMap.Length, slotMap(ni), -1)
+            Dim desiredV As Double = Double.NaN
+            If ni < DesiredDisplayValues.Count AndAlso Not Double.IsNaN(DesiredDisplayValues(ni)) Then
+                desiredV = DesiredDisplayValues(ni)
+            ElseIf oi >= 0 AndAlso oi < oldCurves.Count AndAlso oldCurves(oi) IsNot Nothing AndAlso oi < oldParams.Count Then
+                desiredV = DisplayValueFromCurve(oi, oldCurves(oi), oldParams(oi))
+            End If
+            If Double.IsNaN(desiredV) Then Continue For
+
+            Dim appliedV As Double
+            Dim t As Double = NormalizedFromDisplayValueClamped(ni, newCrv, desiredV, appliedV)
+            SliderParams(ni) = t
+            SetDesiredDisplayValue(ni, desiredV)
+        Next
+    End Sub
+
     Friend Sub SetStateFromUndo(newParams As List(Of Double), newEdited As List(Of Boolean), newPreserve As Boolean, newProximity As Boolean,
                                 newSaveShifted As Boolean, newShifted As List(Of ShiftedSliderEntry),
                                 newReal As Boolean, newCustomDomain As Boolean, newSnapValues As Boolean, newSnappingTicks As Boolean,
-                                newStartingPosition As Boolean, newLockUnselected As Boolean)
+                                newStartingPosition As Boolean, newLockUnselected As Boolean,
+                                newPreserveDisplayValue As Boolean, newDesired As List(Of Double))
         SliderParams = New List(Of Double)(newParams)
         ParamUserEdited = New List(Of Boolean)(newEdited)
         PreserveChanges = newPreserve
         ProximityCache = newProximity
-        SaveShifted = newSaveShifted
+        SaveShifted = newProximity
         ShiftedSliderEntries = CloneShiftedSliderList(newShifted)
+        PreserveDisplayValue = newPreserveDisplayValue
+        DesiredDisplayValues = If(newDesired Is Nothing, New List(Of Double), New List(Of Double)(newDesired))
         ShowRealValue = newReal
         Dim needSync As Boolean = (CustomDomain <> newCustomDomain) OrElse (SnapValues <> newSnapValues) OrElse (SnappingTicks <> newSnappingTicks) OrElse (StartingPosition <> newStartingPosition)
         CustomDomain = newCustomDomain
@@ -1309,6 +1465,7 @@ Public Class CurveSliderComp
             ParamUserEdited.Add(False)
         End While
         ParamUserEdited(index) = True
+        UpdateDesiredDisplayValue(index)
         Me.ExpireSolution(True)
         Try
             Rhino.RhinoDoc.ActiveDoc.Views.Redraw()
@@ -1327,6 +1484,7 @@ Public Class CurveSliderComp
             ParamUserEdited.Add(False)
         End While
         ParamUserEdited(index) = True
+        UpdateDesiredDisplayValue(index)
         Me.ExpireSolution(True)
     End Sub
 
@@ -1339,22 +1497,49 @@ Public Class CurveSliderComp
     ''' <summary>HUD labels draw in DrawForeground so mesh previews cannot cover them.</summary>
     Private Sub SyncLabelConduit()
         If _labelConduit Is Nothing Then Return
-        Dim want As Boolean = Not Me.Hidden AndAlso Curves.Count > 0
+        Dim want As Boolean =
+            ViewportPreview.IsLinkedRhinoDocumentActive(Me) AndAlso
+            ViewportPreview.IsEffectivelyPreviewed(Me) AndAlso
+            Curves.Count > 0
         If _labelConduit.Enabled <> want Then _labelConduit.Enabled = want
     End Sub
 
     ''' <summary>Viewport interaction is live when unlocked, previewed, has curves, and selection rules allow it.</summary>
+    Friend Sub SyncViewportInteraction()
+        SyncMouse()
+    End Sub
+
     Friend Sub SyncMouse()
         Dim selectionOk As Boolean = IsSelectionAllowedForViewport()
         Dim want As Boolean =
+            ViewportPreview.IsLinkedRhinoDocumentActive(Me) AndAlso
             selectionOk AndAlso
             Not Me.Locked AndAlso
-            Not Me.Hidden AndAlso
+            ViewportPreview.IsEffectivelyPreviewed(Me) AndAlso
             Curves.Count > 0
         If SliderMouse IsNot Nothing Then
             If SliderMouse.Enabled <> want Then SliderMouse.Enabled = want
+            SliderMouse.SetHoverPollActive(want)
         End If
         If Not want Then CloseSliderTextBoxIfAny()
+        If Not want AndAlso HoverIndex >= 0 Then
+            HoverIndex = -1
+            Try
+                ViewportPreview.RedrawAllOpenRhinoDocuments()
+            Catch
+            End Try
+        End If
+        SyncLabelConduit()
+    End Sub
+
+    Friend Sub SetHoverIndex(index As Integer)
+        If index < -1 Then index = -1
+        If HoverIndex = index Then Return
+        HoverIndex = index
+        Try
+            ViewportPreview.RedrawAllOpenRhinoDocuments()
+        Catch
+        End Try
     End Sub
 
 #End Region
@@ -1702,9 +1887,14 @@ Public Class CurveSliderComp
         Next
     End Sub
 
-    ''' <summary>Greedy nearest matching: each old slider point claims the closest new curve; its param becomes the projection of the old point onto that curve.</summary>
+    ''' <summary>Greedy nearest matching: each old slider point claims the closest new curve; its param becomes the projection of the old point onto that curve.
+    ''' When the tree address sequence is unchanged, keeps params by list index (list-cache identity).</summary>
     Private Shared Function RemapParamsByProximity(oldCurves As List(Of Curve), oldParams As List(Of Double), newCurves As List(Of Curve),
-                                                   startingParams As List(Of Double)) As List(Of Double)
+                                                   startingParams As List(Of Double),
+                                                   Optional oldPaths As List(Of GH_Path) = Nothing,
+                                                   Optional oldBranch As List(Of Integer) = Nothing,
+                                                   Optional newPaths As List(Of GH_Path) = Nothing,
+                                                   Optional newBranch As List(Of Integer) = Nothing) As List(Of Double)
         Dim result As New List(Of Double)(newCurves.Count)
         For i As Integer = 0 To newCurves.Count - 1
             Dim t0 As Double = 0.5R
@@ -1740,6 +1930,80 @@ Public Class CurveSliderComp
         Next
         Return result
     End Function
+
+    Private Shared Function MakeTreeKey(path As GH_Path, branchIndex As Integer) As String
+        If path Is Nothing Then Return "#" & branchIndex.ToString()
+        Return path.ToString() & "#" & branchIndex.ToString()
+    End Function
+
+    Private Shared Function BuildTreeKeys(paths As List(Of GH_Path), branch As List(Of Integer)) As List(Of String)
+        If paths Is Nothing OrElse branch Is Nothing Then Return New List(Of String)
+        Dim n As Integer = Math.Min(paths.Count, branch.Count)
+        Dim keys As New List(Of String)(n)
+        For i As Integer = 0 To n - 1
+            keys.Add(MakeTreeKey(paths(i), branch(i)))
+        Next
+        Return keys
+    End Function
+
+    Private Shared Function TreeKeysEqual(a As List(Of String), b As List(Of String)) As Boolean
+        If a Is Nothing OrElse b Is Nothing Then Return False
+        If a.Count <> b.Count Then Return False
+        For i As Integer = 0 To a.Count - 1
+            If Not String.Equals(a(i), b(i), StringComparison.Ordinal) Then Return False
+        Next
+        Return True
+    End Function
+
+    Private Shared Function PreferListKeepByProximityIdentity(oldCurves As List(Of Curve), oldPaths As List(Of GH_Path), oldBranch As List(Of Integer),
+                                                              newCurves As List(Of Curve), newPaths As List(Of GH_Path), newBranch As List(Of Integer)) As Boolean
+        If oldCurves Is Nothing OrElse newCurves Is Nothing Then Return True
+        Dim oldGeoms(oldCurves.Count - 1) As GeometryBase
+        Dim newGeoms(newCurves.Count - 1) As GeometryBase
+        For i As Integer = 0 To oldCurves.Count - 1
+            oldGeoms(i) = oldCurves(i)
+        Next
+        For i As Integer = 0 To newCurves.Count - 1
+            newGeoms(i) = newCurves(i)
+        Next
+        Dim slotMap As Integer() = ProximityMatching.BuildTransformSlotMap(
+            oldGeoms, newGeoms, oldPaths, oldBranch, newPaths, newBranch, requireMatchingPaths:=False)
+        Return ProximityMatching.SlotMapIsIndexIdentity(slotMap)
+    End Function
+
+    Private Shared Function ClonePathList(paths As List(Of GH_Path)) As List(Of GH_Path)
+        If paths Is Nothing Then Return New List(Of GH_Path)
+        Dim dst As New List(Of GH_Path)(paths.Count)
+        For Each p As GH_Path In paths
+            dst.Add(If(p Is Nothing, Nothing, New GH_Path(p)))
+        Next
+        Return dst
+    End Function
+
+    Private Shared Function CloneCurveList(src As List(Of Curve)) As List(Of Curve)
+        If src Is Nothing Then Return New List(Of Curve)
+        Dim dst As New List(Of Curve)(src.Count)
+        For Each c As Curve In src
+            dst.Add(If(c Is Nothing, Nothing, c.DuplicateCurve()))
+        Next
+        Return dst
+    End Function
+
+    Private Sub StoreCurveCache(curves As List(Of Curve), paths As List(Of GH_Path), branch As List(Of Integer))
+        CacheCurves = CloneCurveList(curves)
+        CacheCurvePaths = ClonePathList(paths)
+        CacheCurveBranchIndices = If(branch Is Nothing, New List(Of Integer), New List(Of Integer)(branch))
+        CacheTreeKeys = BuildTreeKeys(CacheCurvePaths, CacheCurveBranchIndices)
+    End Sub
+
+    Private Sub ProtectNonEmptyParamsAsEdited()
+        While ParamUserEdited.Count < SliderParams.Count
+            ParamUserEdited.Add(False)
+        End While
+        For i As Integer = 0 To SliderParams.Count - 1
+            ParamUserEdited(i) = True
+        Next
+    End Sub
 
     Private Shared Function CloneShiftedSliderList(src As List(Of ShiftedSliderEntry)) As List(Of ShiftedSliderEntry)
         If src Is Nothing Then Return New List(Of ShiftedSliderEntry)
@@ -1833,17 +2097,21 @@ Public Class CurveSliderComp
         End If
     End Sub
 
-    Private Shared Sub BuildCurvesFromTree(curveData As GH_Structure(Of GH_Curve), newCurves As List(Of Curve), newPaths As List(Of GH_Path))
+    Private Shared Sub BuildCurvesFromTree(curveData As GH_Structure(Of GH_Curve), newCurves As List(Of Curve), newPaths As List(Of GH_Path), newBranchIndices As List(Of Integer))
         newCurves.Clear()
         newPaths.Clear()
+        newBranchIndices.Clear()
         For Each path As GH_Path In curveData.Paths
-            For Each gc As GH_Curve In curveData.DataList(path)
+            Dim branch As IList(Of GH_Curve) = curveData.DataList(path)
+            For j As Integer = 0 To branch.Count - 1
+                Dim gc As GH_Curve = branch(j)
                 If gc Is Nothing OrElse gc.Value Is Nothing Then
                     newCurves.Add(Nothing)
                 Else
                     newCurves.Add(gc.Value.DuplicateCurve())
                 End If
                 newPaths.Add(path)
+                newBranchIndices.Add(j)
             Next
         Next
     End Sub
@@ -1889,11 +2157,17 @@ Public Class CurveSliderComp
         If Not DA.GetDataTree(0, curveData) Then
             Curves.Clear()
             CurvePaths.Clear()
+            CurveBranchIndices.Clear()
             Points.Clear()
             CacheCurves = Nothing
-            SyncMouse()
+            CacheCurvePaths = Nothing
+            CacheCurveBranchIndices = Nothing
+            CacheTreeKeys = Nothing
+            SyncViewportInteraction()
             Exit Sub
         End If
+
+        ViewportPreview.EnsurePreviewRhinoDoc(Me)
 
         CustomInterval = Interval.Unset
         SnapDisplayValues.Clear()
@@ -1905,10 +2179,12 @@ Public Class CurveSliderComp
 
         Dim newCurves As New List(Of Curve)
         Dim newPaths As New List(Of GH_Path)
-        BuildCurvesFromTree(curveData, newCurves, newPaths)
+        Dim newBranchIndices As New List(Of Integer)
+        BuildCurvesFromTree(curveData, newCurves, newPaths, newBranchIndices)
 
         Curves = newCurves
         CurvePaths = newPaths
+        CurveBranchIndices = newBranchIndices
         BuildSlotSettings(DA, curveData)
 
         Dim prevStartingParams As New List(Of Double)(StartingParams)
@@ -1927,26 +2203,37 @@ Public Class CurveSliderComp
             StartingParams.Add(0.5R)
         End While
 
-        If CacheCurves Is Nothing Then
-            CacheCurves = newCurves
-            If ProximityCache AndAlso SaveShifted Then
+        If CacheCurves Is Nothing OrElse CacheTreeKeys Is Nothing Then
+            StoreCurveCache(newCurves, newPaths, newBranchIndices)
+            If ProximityCache Then
                 ApplyShiftedParams(newCurves)
             End If
-        ElseIf Not CurvesEqual(CacheCurves, newCurves) Then
-            If ProximityCache Then
-                Dim prevParams As New List(Of Double)(SliderParams)
+        ElseIf Not CurvesEqual(CacheCurves, newCurves) OrElse Not TreeKeysEqual(CacheTreeKeys, BuildTreeKeys(newPaths, newBranchIndices)) Then
+            Dim prevParams As New List(Of Double)(SliderParams)
+            Dim newTreeKeys As List(Of String) = BuildTreeKeys(newPaths, newBranchIndices)
+            Dim treeChanged As Boolean = Not TreeKeysEqual(CacheTreeKeys, newTreeKeys)
+            Dim preferIndexKeep As Boolean = PreserveChanges AndAlso Not treeChanged AndAlso
+                (Not ProximityCache OrElse PreferListKeepByProximityIdentity(CacheCurves, CacheCurvePaths, CacheCurveBranchIndices, newCurves, newPaths, newBranchIndices))
+
+            If preferIndexKeep Then
+                ProtectNonEmptyParamsAsEdited()
+            ElseIf ProximityCache Then
                 Dim prevEdited As New List(Of Boolean)(ParamUserEdited)
-                SliderParams = RemapParamsByProximity(CacheCurves, SliderParams, newCurves, StartingParams)
-                If SaveShifted Then
-                    RememberShiftedParams(CacheCurves, prevParams, prevEdited, prevStartingParams, newCurves)
-                    ApplyShiftedParams(newCurves)
-                End If
+                SliderParams = RemapParamsByProximity(CacheCurves, SliderParams, newCurves, StartingParams,
+                                                      CacheCurvePaths, CacheCurveBranchIndices, newPaths, newBranchIndices)
+                RememberShiftedParams(CacheCurves, prevParams, prevEdited, prevStartingParams, newCurves)
+                ApplyShiftedParams(newCurves)
+                ProtectNonEmptyParamsAsEdited()
             ElseIf Not PreserveChanges Then
                 SliderParams.Clear()
                 ParamUserEdited.Clear()
+                DesiredDisplayValues.Clear()
             End If
-            CacheCurves = newCurves
-        ElseIf ProximityCache AndAlso SaveShifted Then
+            If PreserveDisplayValue Then
+                ApplyPreserveDisplayValueAfterCurveChange(CacheCurves, prevParams, newCurves)
+            End If
+            StoreCurveCache(newCurves, newPaths, newBranchIndices)
+        ElseIf ProximityCache Then
             ApplyShiftedParams(newCurves)
         End If
 
@@ -1962,6 +2249,7 @@ Public Class CurveSliderComp
         If Not PreserveChanges AndAlso ParamUserEdited.Count > Curves.Count Then
             ParamUserEdited.RemoveRange(Curves.Count, ParamUserEdited.Count - Curves.Count)
         End If
+        EnsureDesiredDisplayValueCount(Curves.Count)
 
         If EditIndex >= Curves.Count OrElse (EditIndex >= 0 AndAlso Not IsCurveActiveForViewport(EditIndex)) Then CloseSliderTextBoxIfAny()
 
@@ -2261,6 +2549,11 @@ Public Class CurveSliderComp
             Dim crv As Curve = Curves(i)
             If crv Is Nothing Then Continue For
 
+            If drawGraphics Then
+                Dim thickness As Integer = If(selected, 2, 1)
+                display.DrawCurve(crv, col, thickness)
+            End If
+
             Dim showRuler As Boolean = ShouldShowRulerAnnotations(crv, vp)
             Dim placedLabels As New List(Of Rhino.Geometry.Point2d)
             Dim stepVal As Double = 0
@@ -2293,7 +2586,14 @@ Public Class CurveSliderComp
             If Not pt.IsValid Then Continue For
 
             If drawGraphics Then
-                display.DrawPoint(pt, PointStyle.RoundControlPoint, 5, col)
+                Dim isHover As Boolean = (i = HoverIndex)
+                Dim handleCol As Color = col
+                Dim handleSize As Integer = 5
+                If isHover Then
+                    handleCol = If(selected, Color.FromArgb(255, 255, 200, 0), Color.FromArgb(255, 100, 100, 100))
+                    handleSize = 8
+                End If
+                display.DrawPoint(pt, PointStyle.RoundControlPoint, handleSize, handleCol)
             End If
 
             If drawLabel AndAlso showRuler Then
@@ -2306,6 +2606,7 @@ Public Class CurveSliderComp
     End Sub
 
     Friend Sub DrawForegroundLabels(e As DrawEventArgs)
+        If Not ViewportPreview.IsLinkedRhinoDocumentActive(Me) Then Return
         If Curves.Count = 0 OrElse e Is Nothing OrElse e.Display Is Nothing OrElse e.Viewport Is Nothing Then Return
         Dim selected As Boolean = Me.Attributes IsNot Nothing AndAlso Me.Attributes.Selected
         Dim col As Color = PreviewLabelColour(selected)
@@ -2319,7 +2620,8 @@ Public Class CurveSliderComp
 
     Public Overrides Sub DrawViewportWires(args As IGH_PreviewArgs)
         If Curves.Count = 0 Then Return
-        SyncLabelConduit()
+        If Not ViewportPreview.IsLinkedRhinoDocumentActive(Me) Then Return
+        SyncMouse()
 
         Dim selected As Boolean = Me.Attributes IsNot Nothing AndAlso Me.Attributes.Selected
         Dim col As Color = If(selected, args.WireColour_Selected, args.WireColour)
@@ -2329,9 +2631,14 @@ Public Class CurveSliderComp
     Public Overrides ReadOnly Property ClippingBox As BoundingBox
         Get
             Dim bb As BoundingBox = BoundingBox.Empty
-            For i As Integer = 0 To Points.Count - 1
+            For i As Integer = 0 To Curves.Count - 1
                 If Not IsCurveActiveForViewport(i) Then Continue For
-                Dim p As Point3d = Points(i)
+                Dim crv As Curve = If(i < Curves.Count, Curves(i), Nothing)
+                If crv IsNot Nothing Then
+                    Dim cbb As BoundingBox = crv.GetBoundingBox(True)
+                    If cbb.IsValid Then bb.Union(cbb)
+                End If
+                Dim p As Point3d = If(i < Points.Count, Points(i), Point3d.Unset)
                 If p.IsValid Then bb.Union(p)
             Next
             If bb.IsValid Then bb.Inflate(1.0R)
@@ -2346,13 +2653,14 @@ Public Class CurveSliderComp
     Public Overrides Function Write(writer As GH_IO.Serialization.GH_IWriter) As Boolean
         writer.SetBoolean("CS_Preserve", PreserveChanges)
         writer.SetBoolean("CS_Proximity", ProximityCache)
-        writer.SetBoolean("CS_SaveShifted", Me.SaveShifted)
+        writer.SetBoolean("CS_SaveShifted", ProximityCache)
         writer.SetBoolean("CS_Real", ShowRealValue)
         writer.SetBoolean("CS_CustomDomain", CustomDomain)
         writer.SetBoolean("CS_Snap", SnapValues)
         writer.SetBoolean("CS_SnapTicks", SnappingTicks)
         writer.SetBoolean("CS_StartingPosition", StartingPosition)
         writer.SetBoolean("CS_LockUnselected", LockUnselected)
+        writer.SetBoolean("CS_KeepDisplay", PreserveDisplayValue)
         writer.SetInt32("CS_Count", SliderParams.Count)
         For i As Integer = 0 To SliderParams.Count - 1
             writer.SetDouble("CS_Param", i, SliderParams(i))
@@ -2372,6 +2680,10 @@ Public Class CurveSliderComp
             writer.SetDouble("CS_ShiftedParam", i, entry.Param)
             writer.SetBoolean("CS_ShiftedEdited", i, entry.UserEdited)
         Next
+        writer.SetInt32("CS_DesiredCount", DesiredDisplayValues.Count)
+        For i As Integer = 0 To DesiredDisplayValues.Count - 1
+            writer.SetDouble("CS_Desired", i, DesiredDisplayValues(i))
+        Next
         Return MyBase.Write(writer)
     End Function
 
@@ -2383,11 +2695,9 @@ Public Class CurveSliderComp
         Dim prox As Boolean = False
         reader.TryGetBoolean("CS_Proximity", prox)
         ProximityCache = prox
-
-        Dim loadedSaveShifted As Boolean = False
-        If reader.TryGetBoolean("CS_SaveShifted", loadedSaveShifted) Then
-            Me.SaveShifted = loadedSaveShifted
-        End If
+        SaveShifted = prox
+        Dim discardSs As Boolean = False
+        reader.TryGetBoolean("CS_SaveShifted", discardSs)
 
         Dim realV As Boolean = True
         reader.TryGetBoolean("CS_Real", realV)
@@ -2412,6 +2722,10 @@ Public Class CurveSliderComp
         Dim lockUnsel As Boolean = True
         reader.TryGetBoolean("CS_LockUnselected", lockUnsel)
         LockUnselected = lockUnsel
+
+        Dim keepDisplay As Boolean = False
+        reader.TryGetBoolean("CS_KeepDisplay", keepDisplay)
+        PreserveDisplayValue = keepDisplay
 
         ' Register optional inputs before MyBase.Read so archived param data/sources map onto them.
         SyncOptionalInputs()
@@ -2451,6 +2765,16 @@ Public Class CurveSliderComp
                 entry.Param = reader.GetDouble("CS_ShiftedParam", i)
                 reader.TryGetBoolean("CS_ShiftedEdited", i, entry.UserEdited)
                 If entry.Key.Center.IsValid Then ShiftedSliderEntries.Add(entry)
+            Next
+        End If
+
+        DesiredDisplayValues.Clear()
+        Dim desiredCount As Integer = 0
+        If reader.TryGetInt32("CS_DesiredCount", desiredCount) AndAlso desiredCount > 0 Then
+            For i As Integer = 0 To desiredCount - 1
+                Dim dv As Double = Double.NaN
+                reader.TryGetDouble("CS_Desired", i, dv)
+                DesiredDisplayValues.Add(dv)
             Next
         End If
         Return MyBase.Read(reader)
@@ -2494,7 +2818,7 @@ Public Class CurveSliderCompAtt
         End Get
         Set(value As Boolean)
             MyBase.Selected = value
-            MyOwner.SyncMouse()
+            MyOwner.SyncViewportInteraction()
         End Set
     End Property
 
@@ -2517,6 +2841,8 @@ Public Class CurveSliderUndo
     Private _snappingTicks As Boolean
     Private _startingPosition As Boolean
     Private _lockUnselected As Boolean
+    Private _preserveDisplayValue As Boolean
+    Private _desired As List(Of Double)
 
     Sub New(owner As CurveSliderComp)
         _ownerId = owner.InstanceGuid
@@ -2532,7 +2858,14 @@ Public Class CurveSliderUndo
         _snappingTicks = owner.SnappingTicks
         _startingPosition = owner.StartingPosition
         _lockUnselected = owner.LockUnselected
+        _preserveDisplayValue = owner.PreserveDisplayValue
+        _desired = CloneDesiredDisplayListForUndo(owner.DesiredDisplayValues)
     End Sub
+
+    Private Shared Function CloneDesiredDisplayListForUndo(src As List(Of Double)) As List(Of Double)
+        If src Is Nothing Then Return New List(Of Double)
+        Return New List(Of Double)(src)
+    End Function
 
     Private Shared Function CloneShiftedSliderListForUndo(src As List(Of ShiftedSliderEntry)) As List(Of ShiftedSliderEntry)
         If src Is Nothing Then Return New List(Of ShiftedSliderEntry)
@@ -2562,7 +2895,9 @@ Public Class CurveSliderUndo
         Dim curSnapTicks As Boolean = comp.SnappingTicks
         Dim curStarting As Boolean = comp.StartingPosition
         Dim curLockUnselected As Boolean = comp.LockUnselected
-        comp.SetStateFromUndo(_params, _edited, _preserve, _proximity, _saveShifted, _shifted, _real, _customDomain, _snapValues, _snappingTicks, _startingPosition, _lockUnselected)
+        Dim curPreserveDisplayValue As Boolean = comp.PreserveDisplayValue
+        Dim curDesired As List(Of Double) = CloneDesiredDisplayListForUndo(comp.DesiredDisplayValues)
+        comp.SetStateFromUndo(_params, _edited, _preserve, _proximity, _saveShifted, _shifted, _real, _customDomain, _snapValues, _snappingTicks, _startingPosition, _lockUnselected, _preserveDisplayValue, _desired)
         _params = curParams
         _edited = curEdited
         _preserve = curPreserve
@@ -2575,6 +2910,8 @@ Public Class CurveSliderUndo
         _snappingTicks = curSnapTicks
         _startingPosition = curStarting
         _lockUnselected = curLockUnselected
+        _preserveDisplayValue = curPreserveDisplayValue
+        _desired = curDesired
     End Sub
 
 End Class
@@ -2600,20 +2937,103 @@ Public Class CurveSliderMouse
     ''' <summary>Undo snapshot captured at mouse-down; registered on mouse-up only if a drag happened.</summary>
     Private _pendingUndo As CurveSliderUndo = Nothing
 
-    Protected Overrides Sub OnMouseDown(e As Rhino.UI.MouseCallbackEventArgs)
-        MyBase.OnMouseDown(e)
-        _dragIndex = -1
-        _dragged = False
-        _pendingUndo = Nothing
-        If Comp Is Nothing Then Exit Sub
-        If e.Button <> MouseButtons.Left Then Exit Sub
-        If e.View Is Nothing Then Exit Sub
+    ''' <summary>Rhino MouseCallback misses moves while Grasshopper has focus; poll global cursor instead.</summary>
+    Private _hoverTimer As Timer
+    Private _hoverPollActive As Boolean
+    Private _hookedCanvas As GH_Canvas
 
-        Comp.CloseSliderTextBoxIfAny()
+    Friend Sub SetHoverPollActive(active As Boolean)
+        _hoverPollActive = active AndAlso Me.Enabled
+        If _hoverPollActive Then
+            EnsureHoverTimer()
+            _hoverTimer.Enabled = True
+            AttachGhCanvasHoverHook()
+            PollHoverFromGlobalCursor()
+        Else
+            If _hoverTimer IsNot Nothing Then _hoverTimer.Enabled = False
+            DetachGhCanvasHoverHook()
+            If Comp IsNot Nothing Then Comp.SetHoverIndex(-1)
+        End If
+    End Sub
 
-        Dim vp As RhinoViewport = e.View.ActiveViewport
-        If vp Is Nothing Then Exit Sub
+    Private Sub EnsureHoverTimer()
+        If _hoverTimer IsNot Nothing Then Return
+        _hoverTimer = New Timer With {.Interval = 40}
+        AddHandler _hoverTimer.Tick, AddressOf OnHoverPollTick
+    End Sub
 
+    Private Sub OnHoverPollTick(sender As Object, e As EventArgs)
+        PollHoverFromGlobalCursor()
+    End Sub
+
+    Private Sub AttachGhCanvasHoverHook()
+        DetachGhCanvasHoverHook()
+        Dim cv As GH_Canvas = TryResolveGrasshopperCanvas()
+        If cv Is Nothing Then Return
+        _hookedCanvas = cv
+        AddHandler _hookedCanvas.MouseMove, AddressOf GhCanvas_MouseMoveHover
+    End Sub
+
+    Private Sub DetachGhCanvasHoverHook()
+        If _hookedCanvas Is Nothing Then Return
+        RemoveHandler _hookedCanvas.MouseMove, AddressOf GhCanvas_MouseMoveHover
+        _hookedCanvas = Nothing
+    End Sub
+
+    Private Sub GhCanvas_MouseMoveHover(sender As Object, e As MouseEventArgs)
+        PollHoverFromGlobalCursor()
+    End Sub
+
+    Private Shared Function TryResolveGrasshopperCanvas() As GH_Canvas
+        Dim cv As GH_Canvas = Grasshopper.Instances.ActiveCanvas
+        If cv IsNot Nothing Then Return cv
+        Dim ed As Control = TryCast(Grasshopper.Instances.DocumentEditor, Control)
+        If ed Is Nothing Then Return Nothing
+        Return FindDescendantCanvas(ed)
+    End Function
+
+    Private Shared Function FindDescendantCanvas(root As Control) As GH_Canvas
+        Dim q As GH_Canvas = TryCast(root, GH_Canvas)
+        If q IsNot Nothing Then Return q
+        For Each ch As Control In root.Controls
+            Dim n As GH_Canvas = FindDescendantCanvas(ch)
+            If n IsNot Nothing Then Return n
+        Next
+        Return Nothing
+    End Function
+
+    ''' <summary>Hit-test slider dots using screen cursor position (works when GH, not Rhino, has focus).</summary>
+    Friend Sub PollHoverFromGlobalCursor()
+        If Not _hoverPollActive OrElse Comp Is Nothing OrElse _dragIndex >= 0 Then Return
+        Try
+            Dim screenPt As Drawing.Point = Control.MousePosition
+            Dim ghDoc As GH_Document = Comp.OnPingDocument()
+            Dim targetDoc As Rhino.RhinoDoc = If(ghDoc IsNot Nothing, ghDoc.RhinoDocument, Nothing)
+            If targetDoc Is Nothing Then targetDoc = Rhino.RhinoDoc.ActiveDoc
+            If targetDoc Is Nothing Then
+                Comp.SetHoverIndex(-1)
+                Return
+            End If
+
+            For Each view As RhinoView In targetDoc.Views
+                If view Is Nothing Then Continue For
+                If view.Document IsNot targetDoc Then Continue For
+                Dim rect As Drawing.Rectangle = view.ScreenRectangle
+                If rect.Width <= 0 OrElse rect.Height <= 0 Then Continue For
+                If Not rect.Contains(screenPt) Then Continue For
+                Dim clientPt As Drawing.Point = view.ScreenToClient(screenPt)
+                Dim vp As RhinoViewport = view.ActiveViewport
+                If vp Is Nothing Then Continue For
+                Comp.SetHoverIndex(PickSliderIndex(vp, clientPt))
+                Return
+            Next
+            Comp.SetHoverIndex(-1)
+        Catch
+        End Try
+    End Sub
+
+    Private Function PickSliderIndex(vp As RhinoViewport, viewportPt As Drawing.Point) As Integer
+        If Comp Is Nothing OrElse vp Is Nothing Then Return -1
         Dim hit As Integer = -1
         Dim bestDist As Double = Double.PositiveInfinity
         For i As Integer = 0 To Comp.Points.Count - 1
@@ -2622,20 +3042,55 @@ Public Class CurveSliderMouse
             If Not wpt.IsValid Then Continue For
             If Not vp.IsVisible(wpt) Then Continue For
             Dim spt As Rhino.Geometry.Point2d = vp.WorldToClient(wpt)
-            Dim dx As Double = spt.X - CDbl(e.ViewportPoint.X)
-            Dim dy As Double = spt.Y - CDbl(e.ViewportPoint.Y)
+            Dim dx As Double = spt.X - CDbl(viewportPt.X)
+            Dim dy As Double = spt.Y - CDbl(viewportPt.Y)
             Dim d2 As Double = dx * dx + dy * dy
             If d2 <= PickRadiusPx * PickRadiusPx AndAlso d2 < bestDist Then
                 bestDist = d2
                 hit = i
             End If
         Next
+        Return hit
+    End Function
+
+    Private Sub UpdateHoverFromViewport(e As Rhino.UI.MouseCallbackEventArgs)
+        If Comp Is Nothing OrElse e.View Is Nothing Then Return
+        Dim vp As RhinoViewport = e.View.ActiveViewport
+        If vp Is Nothing Then Return
+        Comp.SetHoverIndex(PickSliderIndex(vp, e.ViewportPoint))
+    End Sub
+
+    Protected Overrides Sub OnMouseDown(e As Rhino.UI.MouseCallbackEventArgs)
+        MyBase.OnMouseDown(e)
+        _dragIndex = -1
+        _dragged = False
+        _pendingUndo = Nothing
+        If Comp Is Nothing Then Exit Sub
+        If Not ViewportPreview.IsLinkedRhinoDocumentActive(Comp) Then Exit Sub
+        If e.View IsNot Nothing AndAlso e.View.Document IsNot Nothing Then
+            Dim owner As Rhino.RhinoDoc = Comp.PreviewRhinoDoc
+            If owner Is Nothing Then
+                Dim ghDoc As GH_Document = Comp.OnPingDocument()
+                owner = If(ghDoc IsNot Nothing, ghDoc.RhinoDocument, Nothing)
+            End If
+            If owner IsNot Nothing AndAlso Not ReferenceEquals(e.View.Document, owner) Then Exit Sub
+        End If
+        If e.Button <> MouseButtons.Left Then Exit Sub
+        If e.View Is Nothing Then Exit Sub
+
+        Comp.CloseSliderTextBoxIfAny()
+
+        Dim vp As RhinoViewport = e.View.ActiveViewport
+        If vp Is Nothing Then Exit Sub
+
+        Dim hit As Integer = PickSliderIndex(vp, e.ViewportPoint)
 
         If hit < 0 Then Exit Sub
 
         _dragIndex = hit
         _downViewport = e.ViewportPoint
         _pendingUndo = New CurveSliderUndo(Comp)
+        If _hoverTimer IsNot Nothing Then _hoverTimer.Enabled = False
         ' The slider dot is ours; swallow the press so Rhino does not start a selection window.
         e.Cancel = True
     End Sub
@@ -2658,7 +3113,10 @@ Public Class CurveSliderMouse
 
     Protected Overrides Sub OnMouseMove(e As Rhino.UI.MouseCallbackEventArgs)
         MyBase.OnMouseMove(e)
-        If _dragIndex < 0 Then Exit Sub
+        If _dragIndex < 0 Then
+            UpdateHoverFromViewport(e)
+            Exit Sub
+        End If
         If Comp Is Nothing OrElse _dragIndex >= Comp.Curves.Count Then Exit Sub
 
         If Not _dragged Then
@@ -2669,6 +3127,7 @@ Public Class CurveSliderMouse
                 Exit Sub
             End If
             _dragged = True
+            Comp.SetHoverIndex(_dragIndex)
         End If
 
         Dim t As Double
@@ -2737,6 +3196,8 @@ Public Class CurveSliderMouse
         If dragged Then
             If undo IsNot Nothing Then Comp.RecordUndoEvent("Curve Slider Drag", undo)
             e.Cancel = True
+            If _hoverPollActive AndAlso _hoverTimer IsNot Nothing Then _hoverTimer.Enabled = True
+            PollHoverFromGlobalCursor()
             Exit Sub
         End If
 
@@ -2744,6 +3205,8 @@ Public Class CurveSliderMouse
         Comp.EditIndex = ix
         Dim current As String = Comp.DisplayValue(ix).ToString("0.######", Globalization.CultureInfo.InvariantCulture)
         Comp.SliderTextBox = New FormCurveSliderBox(Control.MousePosition, Comp, ix, current)
+        If _hoverPollActive AndAlso _hoverTimer IsNot Nothing Then _hoverTimer.Enabled = True
+        PollHoverFromGlobalCursor()
         e.Cancel = True
     End Sub
 

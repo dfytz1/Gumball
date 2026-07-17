@@ -86,7 +86,8 @@ Friend Module ProximityMatching
     ''' <summary>Maps each new slot index to an old slot index (-1 = no match). Uses same-index then greedy nearest within tolerance.</summary>
     Friend Function BuildTransformSlotMap(oldGeoms As GeometryBase(), newGeoms As GeometryBase(),
                                           oldPaths As IList(Of GH_Path), oldBranch As IList(Of Integer),
-                                          newPaths As IList(Of GH_Path), newBranch As IList(Of Integer)) As Integer()
+                                          newPaths As IList(Of GH_Path), newBranch As IList(Of Integer),
+                                          Optional requireMatchingPaths As Boolean = True) As Integer()
         Dim nNew As Integer = If(newGeoms Is Nothing, 0, newGeoms.Length)
         Dim map As Integer() = Enumerable.Repeat(-1, Math.Max(0, nNew)).ToArray()
         If oldGeoms Is Nothing OrElse newGeoms Is Nothing OrElse nNew = 0 OrElse oldGeoms.Length = 0 Then Return map
@@ -100,11 +101,13 @@ Friend Module ProximityMatching
         Dim sameIndexLimit As Integer = Math.Min(nOld, nNew)
         For i As Integer = 0 To sameIndexLimit - 1
             If usedOld.Contains(i) OrElse usedNew.Contains(i) Then Continue For
-            If oldPaths IsNot Nothing AndAlso newPaths IsNot Nothing AndAlso i < oldPaths.Count AndAlso i < newPaths.Count Then
-                If Not PathsEqual(oldPaths(i), newPaths(i)) Then Continue For
-            End If
-            If oldBranch IsNot Nothing AndAlso newBranch IsNot Nothing AndAlso i < oldBranch.Count AndAlso i < newBranch.Count Then
-                If oldBranch(i) <> newBranch(i) Then Continue For
+            If requireMatchingPaths Then
+                If oldPaths IsNot Nothing AndAlso newPaths IsNot Nothing AndAlso i < oldPaths.Count AndAlso i < newPaths.Count Then
+                    If Not PathsEqual(oldPaths(i), newPaths(i)) Then Continue For
+                End If
+                If oldBranch IsNot Nothing AndAlso newBranch IsNot Nothing AndAlso i < oldBranch.Count AndAlso i < newBranch.Count Then
+                    If oldBranch(i) <> newBranch(i) Then Continue For
+                End If
             End If
             Dim ka As GeometryProximityKey = Nothing
             Dim kb As GeometryProximityKey = Nothing
@@ -159,6 +162,39 @@ Friend Module ProximityMatching
             If IsWithinProximityMatch(ka, kb) Then Return True
         Next
         Return False
+    End Function
+
+    ''' <summary>
+    ''' True when every matched new slot maps to the same index (or is unmatched).
+    ''' Unmatched-only maps (far moves) count as identity so list-cache can keep by index;
+    ''' wrap-shifts / reorders produce non-identity maps and should use proximity.
+    ''' </summary>
+    Friend Function SlotMapIsIndexIdentity(map As Integer()) As Boolean
+        If map Is Nothing Then Return True
+        For j As Integer = 0 To map.Length - 1
+            If map(j) >= 0 AndAlso map(j) <> j Then Return False
+        Next
+        Return True
+    End Function
+
+    Friend Function CentersAsPointGeoms(centers As IList(Of Point3d)) As GeometryBase()
+        If centers Is Nothing Then Return New GeometryBase() {}
+        Dim arr(centers.Count - 1) As GeometryBase
+        For i As Integer = 0 To centers.Count - 1
+            If centers(i).IsValid Then
+                arr(i) = New Point(centers(i))
+            End If
+        Next
+        Return arr
+    End Function
+
+    ''' <summary>Proximity slot map from point centres (Text Tag / Button locations).</summary>
+    Friend Function BuildCenterSlotMap(oldCenters As IList(Of Point3d), newCenters As IList(Of Point3d),
+                                       oldPaths As IList(Of GH_Path), oldBranch As IList(Of Integer),
+                                       newPaths As IList(Of GH_Path), newBranch As IList(Of Integer),
+                                       Optional requireMatchingPaths As Boolean = False) As Integer()
+        Return BuildTransformSlotMap(CentersAsPointGeoms(oldCenters), CentersAsPointGeoms(newCenters),
+                                     oldPaths, oldBranch, newPaths, newBranch, requireMatchingPaths)
     End Function
 
 End Module

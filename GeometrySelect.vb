@@ -342,7 +342,6 @@ Public Class GeometrySelectComp
         ZuiOptionalKind.LockUnselected,
         ZuiOptionalKind.PreserveChanges,
         ZuiOptionalKind.ProximityCache,
-        ZuiOptionalKind.SaveShifted,
         ZuiOptionalKind.ClearCache
     }
 
@@ -476,15 +475,11 @@ Public Class GeometrySelectComp
 
         Menu_AppendSeparator(menu)
 
-        Dim preserve As ToolStripMenuItem = Menu_AppendItem(menu, "Preserve changes", AddressOf Menu_PreserveChanges, True, MenuBoolChecked(PreserveChanges, ZuiOptionalKind.PreserveChanges))
-        preserve.ToolTipText = "Keep selection flags per item index when upstream geometry changes."
+        Dim listCache As ToolStripMenuItem = Menu_AppendItem(menu, "List cache", AddressOf Menu_PreserveChanges, True, MenuBoolChecked(PreserveChanges, ZuiOptionalKind.PreserveChanges))
+        listCache.ToolTipText = "Keep selection by tree path / list index when geometry moves. With Proximity also on: keep by index for far moves; proximity remaps wrap-shifts, culls, grafts, and tree changes."
 
         Dim proximity As ToolStripMenuItem = Menu_AppendItem(menu, "Proximity cache", AddressOf Menu_ProximityCache, True, MenuBoolChecked(ProximityCache, ZuiOptionalKind.ProximityCache))
-        proximity.ToolTipText = "When the list changes, re-attach each selection to the nearest cached geometry instead of the list index."
-
-        Dim saveShifted As ToolStripMenuItem = Menu_AppendItem(menu, "Save shifted", AddressOf Menu_SaveShifted, True, HasZuiInput(ZuiOptionalKind.SaveShifted) OrElse Me.SaveShifted)
-        saveShifted.Enabled = MenuBoolChecked(ProximityCache, ZuiOptionalKind.ProximityCache)
-        saveShifted.ToolTipText = "When proximity cache is on, remember selections for geometry that leaves the list and restore them if it returns."
+        proximity.ToolTipText = "Re-attach selection by nearest cached geometry on wrap-shifts, culls, grafts, and other list/tree changes. Culled items are always saved and restored if they return (save-shifted)."
 
         Dim cc As ToolStripMenuItem = Menu_AppendItem(menu, "Clear cache", AddressOf Menu_ClearCache, True)
         cc.ToolTipText = "Clear all selections."
@@ -514,7 +509,7 @@ Public Class GeometrySelectComp
     End Sub
 
     Private Sub Menu_PreserveChanges()
-        RecordUndoEvent("Selector Preserve", New GeometrySelectUndo(Me))
+        RecordUndoEvent("Selector List Cache", New GeometrySelectUndo(Me))
         PreserveChanges = Not PreserveChanges
         Me.ExpireSolution(True)
     End Sub
@@ -522,13 +517,8 @@ Public Class GeometrySelectComp
     Private Sub Menu_ProximityCache()
         RecordUndoEvent("Selector Proximity", New GeometrySelectUndo(Me))
         ProximityCache = Not ProximityCache
+        If ProximityCache Then SaveShifted = True
         Me.ExpireSolution(True)
-    End Sub
-
-    Private Sub Menu_SaveShifted()
-        If Not MenuBoolChecked(ProximityCache, ZuiOptionalKind.ProximityCache) Then Return
-        RecordUndoEvent("Selector Save Shifted", New GeometrySelectUndo(Me))
-        SetZuiKindEnabled(ZuiOptionalKind.SaveShifted, Not (HasZuiInput(ZuiOptionalKind.SaveShifted) OrElse SaveShifted))
     End Sub
 
     Public Sub Menu_ClearCache()
@@ -660,14 +650,14 @@ Public Class GeometrySelectComp
                 Return CreateBoolZuiParam("Lock unselected", "Lu",
                     "When true, viewport picking works only while this component is selected on the Grasshopper canvas. Overridden by Active when that input is present.")
             Case ZuiOptionalKind.PreserveChanges
-                Return CreateBoolZuiParam("Preserve changes", "Pr",
-                    "Keep selection flags per item index when upstream geometry changes.")
+                Return CreateBoolZuiParam("List cache", "Pr",
+                    "Keep selection by tree path / list index when geometry moves. With Proximity: keep by index for far moves; proximity remaps wrap-shifts and tree changes.")
             Case ZuiOptionalKind.ProximityCache
                 Return CreateBoolZuiParam("Proximity cache", "Px",
-                    "When the list changes, re-attach each selection to the nearest cached geometry instead of the list index.")
+                    "Re-attach selection by nearest cached geometry on wrap-shifts, culls, grafts, and other list/tree changes. Culled items are always saved and restored if they return.")
             Case ZuiOptionalKind.SaveShifted
                 Return CreateBoolZuiParam("Save shifted", "Ss",
-                    "When proximity cache is on, remember selections for geometry that leaves the list and restore them if it returns.")
+                    "Legacy input; ignored. Save-shifted is always active when Proximity cache is on.")
             Case ZuiOptionalKind.ClearCache
                 Return CreateBoolZuiParam("Clear cache", "Cc",
                     "Pulse true to clear all selections (rising edge only).")
@@ -699,7 +689,6 @@ Public Class GeometrySelectComp
         PreselectedIndices = HasZuiInput(ZuiOptionalKind.PreselectedIndices)
         OutputSplitLists = HasZuiOutput(ZuiOptionalOutputKind.UnselectedIndex)
         OutputNulls = HasZuiInput(ZuiOptionalKind.OutputNulls)
-        SaveShifted = HasZuiInput(ZuiOptionalKind.SaveShifted)
     End Sub
 
     Private Function ZuiInputWired(ix As Integer) As Boolean
@@ -754,9 +743,6 @@ Public Class GeometrySelectComp
         EnsureZuiMatchesFlag(ZuiOptionalKind.PreselectedIndices, PreselectedIndices)
         EnsureZuiOutputMatchesFlag(ZuiOptionalOutputKind.UnselectedIndex, OutputSplitLists)
         EnsureZuiMatchesFlag(ZuiOptionalKind.OutputNulls, OutputNulls)
-        If MenuBoolChecked(ProximityCache, ZuiOptionalKind.ProximityCache) Then
-            EnsureZuiMatchesFlag(ZuiOptionalKind.SaveShifted, SaveShifted)
-        End If
         VariableParameterMaintenance()
         Params.OnParametersChanged()
     End Sub
@@ -816,7 +802,7 @@ Public Class GeometrySelectComp
         ApplyBoolInput(DA, FindInputIndexByNick("Lu"), LockUnselected, True)
         ApplyBoolInput(DA, FindInputIndexByNick("Pr"), PreserveChanges, True)
         ApplyBoolInput(DA, FindInputIndexByNick("Px"), ProximityCache, False)
-        ApplyBoolInput(DA, FindInputIndexByNick("Ss"), SaveShifted, False)
+        If ProximityCache Then SaveShifted = True Else SaveShifted = False
 
         Dim ccIx As Integer = FindInputIndexByNick("Cc")
         If ccIx >= 0 AndAlso Params.Input(ccIx).SourceCount > 0 Then
@@ -837,6 +823,7 @@ Public Class GeometrySelectComp
         CacheInstanceGoos = Nothing
         CacheItemPaths = Nothing
         CacheItemBranchIndices = Nothing
+        CacheTreeKeys = Nothing
         CachePreselectTree = Nothing
         Me.ClearData()
         Me.ExpireSolution(True)
@@ -934,6 +921,8 @@ Public Class GeometrySelectComp
     ''' <summary>Cached input paths / branch indices aligned with CacheGeometries.</summary>
     Private CacheItemPaths As List(Of GH_Path) = Nothing
     Private CacheItemBranchIndices As List(Of Integer) = Nothing
+    ''' <summary>Stable tree-structure fingerprint, updated after every cache write including proximity remaps.</summary>
+    Private CacheTreeKeys As List(Of String) = Nothing
 
     ''' <summary>Last applied preselection input (detect wire changes without re-applying on every solve).</summary>
     Private CachePreselectTree As GH_Structure(Of GH_Integer) = Nothing
@@ -941,8 +930,11 @@ Public Class GeometrySelectComp
     ''' <summary>Proximity fingerprints for selected geometry that left the input list (Save shifted).</summary>
     Friend ShiftedSelectionKeys As New List(Of GeometryProximityKey)
 
+    ''' <summary>List cache: keep selection by tree path / list index when geometry moves. With ProximityCache: mixed mode.</summary>
     Public PreserveChanges As Boolean = True
+    ''' <summary>Proximity cache: remap by nearest geometry when list/tree structure changes. Save-shifted always on with this flag.</summary>
     Public ProximityCache As Boolean = False
+    ''' <summary>Always mirrors ProximityCache. Kept for serialization / undo compatibility.</summary>
     Public SaveShifted As Boolean = False
     Public LockUnselected As Boolean = True
 
@@ -965,7 +957,7 @@ Public Class GeometrySelectComp
         Selected = New List(Of Boolean)(newSelected)
         PreserveChanges = newPreserve
         ProximityCache = newProximity
-        SaveShifted = newSaveShifted
+        SaveShifted = newProximity
         ShiftedSelectionKeys = CloneShiftedKeyList(newShiftedKeys)
         PreselectedIndices = newPreselected
         OutputSplitLists = newSplit
@@ -1063,7 +1055,7 @@ Public Class GeometrySelectComp
         Dim want As Boolean =
             selectionOk AndAlso
             Not Me.Locked AndAlso
-            Not Me.Hidden AndAlso
+            ViewportPreview.IsEffectivelyPreviewed(Me) AndAlso
             Geometries.Count > 0
         If PickMouse IsNot Nothing Then
             If PickMouse.Enabled <> want Then PickMouse.Enabled = want
@@ -1183,18 +1175,66 @@ Public Class GeometrySelectComp
     Private Shared Function PathsEqual(a As GH_Path, b As GH_Path) As Boolean
         If a Is Nothing AndAlso b Is Nothing Then Return True
         If a Is Nothing OrElse b Is Nothing Then Return False
-        Return a.Equals(b)
+        If a.Length <> b.Length Then Return False
+        For i As Integer = 0 To a.Length - 1
+            If a(i) <> b(i) Then Return False
+        Next
+        Return True
     End Function
+
+    Private Shared Function MakeTreeKey(path As GH_Path, branchIndex As Integer) As String
+        If path Is Nothing Then Return "#" & branchIndex.ToString()
+        Return path.ToString() & "#" & branchIndex.ToString()
+    End Function
+
+    Private Shared Function BuildTreeKeys(paths As List(Of GH_Path), branch As List(Of Integer)) As List(Of String)
+        If paths Is Nothing OrElse branch Is Nothing Then Return New List(Of String)
+        Dim n As Integer = Math.Min(paths.Count, branch.Count)
+        Dim keys As New List(Of String)(n)
+        For i As Integer = 0 To n - 1
+            keys.Add(MakeTreeKey(paths(i), branch(i)))
+        Next
+        Return keys
+    End Function
+
+    Private Shared Function TreeKeysEqual(a As List(Of String), b As List(Of String)) As Boolean
+        If a Is Nothing OrElse b Is Nothing Then Return False
+        If a.Count <> b.Count Then Return False
+        For i As Integer = 0 To a.Count - 1
+            If Not String.Equals(a(i), b(i), StringComparison.Ordinal) Then Return False
+        Next
+        Return True
+    End Function
+
+    Private Shared Function ClonePathList(paths As List(Of GH_Path)) As List(Of GH_Path)
+        If paths Is Nothing Then Return New List(Of GH_Path)
+        Dim dst As New List(Of GH_Path)(paths.Count)
+        For Each p As GH_Path In paths
+            dst.Add(If(p Is Nothing, Nothing, New GH_Path(p)))
+        Next
+        Return dst
+    End Function
+
+    Private Sub StoreGeometryCache(geoms As List(Of GeometryBase), inst As List(Of GH_InstanceReference),
+                                   paths As List(Of GH_Path), branch As List(Of Integer))
+        CacheGeometries = CloneGeometryList(geoms)
+        CacheInstanceGoos = CloneInstanceGooList(inst)
+        CacheItemPaths = ClonePathList(paths)
+        CacheItemBranchIndices = If(branch Is Nothing, New List(Of Integer), New List(Of Integer)(branch))
+        CacheTreeKeys = BuildTreeKeys(CacheItemPaths, CacheItemBranchIndices)
+    End Sub
 
     Private Shared Function SlotMetadataEqual(aPaths As List(Of GH_Path), aBranch As List(Of Integer),
                                               bPaths As List(Of GH_Path), bBranch As List(Of Integer)) As Boolean
-        If aPaths Is Nothing OrElse bPaths Is Nothing OrElse aBranch Is Nothing OrElse bBranch Is Nothing Then Return False
-        If aPaths.Count <> bPaths.Count OrElse aPaths.Count <> aBranch.Count OrElse bPaths.Count <> bBranch.Count Then Return False
-        For i As Integer = 0 To aPaths.Count - 1
-            If Not PathsEqual(aPaths(i), bPaths(i)) Then Return False
-            If aBranch(i) <> bBranch(i) Then Return False
-        Next
-        Return True
+        Return TreeKeysEqual(BuildTreeKeys(aPaths, aBranch), BuildTreeKeys(bPaths, bBranch))
+    End Function
+
+    Private Shared Function PreferListKeepByProximityIdentity(oldGeoms As List(Of GeometryBase), oldPaths As List(Of GH_Path), oldBranch As List(Of Integer),
+                                                              newGeoms As List(Of GeometryBase), newPaths As List(Of GH_Path), newBranch As List(Of Integer)) As Boolean
+        If oldGeoms Is Nothing OrElse newGeoms Is Nothing Then Return True
+        Dim slotMap As Integer() = ProximityMatching.BuildTransformSlotMap(
+            oldGeoms.ToArray(), newGeoms.ToArray(), oldPaths, oldBranch, newPaths, newBranch, requireMatchingPaths:=False)
+        Return ProximityMatching.SlotMapIsIndexIdentity(slotMap)
     End Function
 
     Private Shared Function GeometriesEqual(a As List(Of GeometryBase), b As List(Of GeometryBase),
@@ -1273,7 +1313,8 @@ Public Class GeometrySelectComp
         Return Point3d.Unset
     End Function
 
-    ''' <summary>Greedy nearest-geometry matching for selection flags (keeps selection on objects when list order/count changes).</summary>
+    ''' <summary>Greedy nearest-geometry matching for selection flags (keeps selection on objects when list order/count changes).
+    ''' When the tree address sequence is unchanged, keeps selection by list index (list-cache identity).</summary>
     Private Shared Function RemapSelectionByProximity(oldGeoms As List(Of GeometryBase), oldInst As List(Of GH_InstanceReference),
                                                         oldSelected As List(Of Boolean),
                                                         oldPaths As List(Of GH_Path), oldBranch As List(Of Integer),
@@ -1578,6 +1619,7 @@ Public Class GeometrySelectComp
             CacheInstanceGoos = Nothing
             CacheItemPaths = Nothing
             CacheItemBranchIndices = Nothing
+            CacheTreeKeys = Nothing
             ShiftedSelectionKeys.Clear()
             SyncMouse()
             Exit Sub
@@ -1594,32 +1636,32 @@ Public Class GeometrySelectComp
         Dim hadGeometryCache As Boolean = (CacheGeometries IsNot Nothing)
         Dim geometryChanged As Boolean = False
 
-        If CacheGeometries Is Nothing Then
-            CacheGeometries = CloneGeometryList(newGeoms)
-            CacheInstanceGoos = CloneInstanceGooList(InstanceGoos)
-            CacheItemPaths = New List(Of GH_Path)(newPaths)
-            CacheItemBranchIndices = New List(Of Integer)(newBranchIndices)
-            If ProximityCache AndAlso SaveShifted Then
+        If CacheGeometries Is Nothing OrElse CacheTreeKeys Is Nothing Then
+            StoreGeometryCache(newGeoms, InstanceGoos, newPaths, newBranchIndices)
+            If ProximityCache Then
                 ApplyShiftedSelections(newGeoms, InstanceGoos, Selected)
             End If
-        ElseIf Not GeometriesEqual(CacheGeometries, newGeoms, CacheInstanceGoos, InstanceGoos, CacheItemPaths, newPaths, CacheItemBranchIndices, newBranchIndices) Then
+        ElseIf Not GeometriesEqual(CacheGeometries, newGeoms, CacheInstanceGoos, InstanceGoos, CacheItemPaths, newPaths, CacheItemBranchIndices, newBranchIndices) OrElse
+               Not TreeKeysEqual(CacheTreeKeys, BuildTreeKeys(newPaths, newBranchIndices)) Then
             geometryChanged = True
-            If ProximityCache Then
+            Dim newTreeKeys As List(Of String) = BuildTreeKeys(newPaths, newBranchIndices)
+            Dim treeChanged As Boolean = Not TreeKeysEqual(CacheTreeKeys, newTreeKeys)
+            Dim preferIndexKeep As Boolean = PreserveChanges AndAlso Not treeChanged AndAlso
+                (Not ProximityCache OrElse PreferListKeepByProximityIdentity(CacheGeometries, CacheItemPaths, CacheItemBranchIndices, newGeoms, newPaths, newBranchIndices))
+
+            If preferIndexKeep Then
+                ' List cache: keep selection; refresh cache below.
+            ElseIf ProximityCache Then
                 Dim prevSelected As New List(Of Boolean)(Selected)
                 Selected = RemapSelectionByProximity(CacheGeometries, CacheInstanceGoos, Selected, CacheItemPaths, CacheItemBranchIndices,
                                                       newGeoms, InstanceGoos, newPaths, newBranchIndices)
-                If SaveShifted Then
-                    RememberShiftedSelections(CacheGeometries, CacheInstanceGoos, prevSelected, newGeoms, InstanceGoos)
-                    ApplyShiftedSelections(newGeoms, InstanceGoos, Selected)
-                End If
+                RememberShiftedSelections(CacheGeometries, CacheInstanceGoos, prevSelected, newGeoms, InstanceGoos)
+                ApplyShiftedSelections(newGeoms, InstanceGoos, Selected)
             ElseIf Not PreserveChanges Then
                 Selected.Clear()
             End If
-            CacheGeometries = CloneGeometryList(newGeoms)
-            CacheInstanceGoos = CloneInstanceGooList(InstanceGoos)
-            CacheItemPaths = New List(Of GH_Path)(newPaths)
-            CacheItemBranchIndices = New List(Of Integer)(newBranchIndices)
-        ElseIf ProximityCache AndAlso SaveShifted Then
+            StoreGeometryCache(newGeoms, InstanceGoos, newPaths, newBranchIndices)
+        ElseIf ProximityCache Then
             ApplyShiftedSelections(newGeoms, InstanceGoos, Selected)
         End If
 
@@ -1856,18 +1898,18 @@ Public Class GeometrySelectComp
         If bb.IsValid Then display.DrawBox(bb, col, thickness)
     End Sub
 
-    Private Shared Sub DrawGeometryMeshes(display As DisplayPipeline, geom As GeometryBase, col As Color)
-        If geom Is Nothing OrElse display Is Nothing Then Return
+    Private Shared Sub DrawGeometryMeshes(display As DisplayPipeline, geom As GeometryBase, mat As DisplayMaterial)
+        If geom Is Nothing OrElse display Is Nothing OrElse mat Is Nothing Then Return
 
         Dim iref As InstanceReferenceGeometry = TryCast(geom, InstanceReferenceGeometry)
         If iref IsNot Nothing Then
-            SelectorInstanceUtil.ForEachWorldPiece(iref, Nothing, Sub(piece) DrawGeometryMeshes(display, piece, col))
+            SelectorInstanceUtil.ForEachWorldPiece(iref, Nothing, Sub(piece) DrawGeometryMeshes(display, piece, mat))
             Return
         End If
 
         Dim brep As Brep = TryCast(geom, Brep)
         If brep IsNot Nothing Then
-            display.DrawBrepShaded(brep, New DisplayMaterial(col))
+            display.DrawBrepShaded(brep, mat)
             Return
         End If
 
@@ -1876,7 +1918,7 @@ Public Class GeometrySelectComp
             Dim tb As Brep = ext.ToBrep()
             If tb IsNot Nothing Then
                 Try
-                    display.DrawBrepShaded(tb, New DisplayMaterial(col))
+                    display.DrawBrepShaded(tb, mat)
                 Finally
                     tb.Dispose()
                 End Try
@@ -1886,7 +1928,7 @@ Public Class GeometrySelectComp
 
         Dim mesh As Mesh = TryCast(geom, Mesh)
         If mesh IsNot Nothing Then
-            display.DrawMeshShaded(mesh, New DisplayMaterial(col))
+            display.DrawMeshShaded(mesh, mat)
             Return
         End If
 
@@ -1895,7 +1937,7 @@ Public Class GeometrySelectComp
             Dim sm As Mesh = Mesh.CreateFromSubD(subd, 2)
             If sm IsNot Nothing Then
                 Try
-                    display.DrawMeshShaded(sm, New DisplayMaterial(col))
+                    display.DrawMeshShaded(sm, mat)
                 Finally
                     sm.Dispose()
                 End Try
@@ -1903,30 +1945,33 @@ Public Class GeometrySelectComp
         End If
     End Sub
 
+    Private Shared ReadOnly ListItemWireColourSelected As Color = Color.FromArgb(255, 255, 210, 0)
+    Private Shared ReadOnly ListItemWireColourUnselected As Color = Color.FromArgb(255, 70, 70, 70)
+
     Public Overrides Sub DrawViewportWires(args As IGH_PreviewArgs)
         If Geometries.Count = 0 Then Return
+        SyncMouse()
 
-        Dim selCol As Color = Color.FromArgb(255, 40, 180, 70)
-        Dim unselCol As Color = If(Me.Attributes IsNot Nothing AndAlso Me.Attributes.Selected, args.WireColour_Selected, args.WireColour)
-
-        For i As Integer = 0 To Geometries.Count - 1
-            Dim g As GeometryBase = Geometries(i)
-            Dim ghInst As GH_InstanceReference = If(i < InstanceGoos.Count, InstanceGoos(i), Nothing)
-            Dim iref As InstanceReferenceGeometry = TryCast(g, InstanceReferenceGeometry)
-            If g Is Nothing AndAlso ghInst IsNot Nothing Then
-                iref = SelectorInstanceUtil.CreateInstanceReferenceGeometry(ghInst)
-                g = iref
-            End If
-            If g Is Nothing AndAlso iref Is Nothing AndAlso ghInst Is Nothing Then Continue For
-            Dim isSel As Boolean = i < Selected.Count AndAlso Selected(i)
-            Dim col As Color = If(isSel, selCol, unselCol)
-            Dim thick As Integer = If(isSel, 2, 1)
-            If iref IsNot Nothing OrElse ghInst IsNot Nothing Then
-                SelectorInstanceUtil.ForEachWorldPiece(iref, ghInst, Sub(piece) DrawGeometryWires(args.Display, piece, col, thick))
-            Else
-                DrawGeometryWires(args.Display, g, col, thick)
-            End If
-        Next
+        If IsSelectionAllowedForViewport() Then
+            For i As Integer = 0 To Geometries.Count - 1
+                Dim g As GeometryBase = Geometries(i)
+                Dim ghInst As GH_InstanceReference = If(i < InstanceGoos.Count, InstanceGoos(i), Nothing)
+                Dim iref As InstanceReferenceGeometry = TryCast(g, InstanceReferenceGeometry)
+                If g Is Nothing AndAlso ghInst IsNot Nothing Then
+                    iref = SelectorInstanceUtil.CreateInstanceReferenceGeometry(ghInst)
+                    g = iref
+                End If
+                If g Is Nothing AndAlso iref Is Nothing AndAlso ghInst Is Nothing Then Continue For
+                Dim isSel As Boolean = i < Selected.Count AndAlso Selected(i)
+                Dim wireCol As Color = If(isSel, ListItemWireColourSelected, ListItemWireColourUnselected)
+                Dim thick As Integer = If(isSel, 2, 1)
+                If iref IsNot Nothing OrElse ghInst IsNot Nothing Then
+                    SelectorInstanceUtil.ForEachWorldPiece(iref, ghInst, Sub(piece) DrawGeometryWires(args.Display, piece, wireCol, thick))
+                Else
+                    DrawGeometryWires(args.Display, g, wireCol, thick)
+                End If
+            Next
+        End If
 
         If RectSelectActive Then
             Dim x0 As Integer = Math.Min(RectSelectStart.X, RectSelectEnd.X)
@@ -1945,7 +1990,6 @@ Public Class GeometrySelectComp
     Public Overrides Sub DrawViewportMeshes(args As IGH_PreviewArgs)
         If Geometries.Count = 0 Then Return
 
-        Dim selCol As Color = Color.FromArgb(120, 40, 180, 70)
         For i As Integer = 0 To Geometries.Count - 1
             Dim g As GeometryBase = Geometries(i)
             Dim ghInst As GH_InstanceReference = If(i < InstanceGoos.Count, InstanceGoos(i), Nothing)
@@ -1956,11 +2000,11 @@ Public Class GeometrySelectComp
             End If
             If g Is Nothing AndAlso iref Is Nothing AndAlso ghInst Is Nothing Then Continue For
             Dim isSel As Boolean = i < Selected.Count AndAlso Selected(i)
-            If Not isSel Then Continue For
+            Dim mat As DisplayMaterial = If(isSel, args.ShadeMaterial_Selected, args.ShadeMaterial)
             If iref IsNot Nothing OrElse ghInst IsNot Nothing Then
-                SelectorInstanceUtil.ForEachWorldPiece(iref, ghInst, Sub(piece) DrawGeometryMeshes(args.Display, piece, selCol))
+                SelectorInstanceUtil.ForEachWorldPiece(iref, ghInst, Sub(piece) DrawGeometryMeshes(args.Display, piece, mat))
             Else
-                DrawGeometryMeshes(args.Display, g, selCol)
+                DrawGeometryMeshes(args.Display, g, mat)
             End If
         Next
     End Sub
@@ -1983,7 +2027,7 @@ Public Class GeometrySelectComp
     Public Overrides Function Write(writer As GH_IO.Serialization.GH_IWriter) As Boolean
         writer.SetBoolean("GS_Preserve", PreserveChanges)
         writer.SetBoolean("GS_Proximity", ProximityCache)
-        writer.SetBoolean("GS_SaveShifted", SaveShifted)
+        writer.SetBoolean("GS_SaveShifted", ProximityCache)
         writer.SetBoolean("GS_Split", OutputSplitLists)
         writer.SetBoolean("GS_Nulls", OutputNulls)
         writer.SetBoolean("GS_Preselected", PreselectedIndices)
@@ -2014,11 +2058,9 @@ Public Class GeometrySelectComp
         Dim prox As Boolean = False
         reader.TryGetBoolean("GS_Proximity", prox)
         ProximityCache = prox
-
-        Dim loadedSaveShifted As Boolean = False
-        If reader.TryGetBoolean("GS_SaveShifted", loadedSaveShifted) Then
-            Me.SaveShifted = loadedSaveShifted
-        End If
+        SaveShifted = prox
+        Dim discardSs As Boolean = False
+        reader.TryGetBoolean("GS_SaveShifted", discardSs)
 
         Dim split As Boolean = False
         reader.TryGetBoolean("GS_Split", split)
@@ -2280,6 +2322,10 @@ Public Class GeometrySelectMouse
 
     Protected Overrides Sub OnMouseUp(e As Rhino.UI.MouseCallbackEventArgs)
         MyBase.OnMouseUp(e)
+        ' Clear a stuck rectangle if another callback swallowed our mouse-down (e.g. Text Tag text entry).
+        If Comp IsNot Nothing AndAlso Comp.RectSelectActive AndAlso Not _mouseDown Then
+            Comp.SetRectSelectState(False, Drawing.Point.Empty, Drawing.Point.Empty)
+        End If
         If Comp Is Nothing Then Exit Sub
         If Not _mouseDown Then Exit Sub
         If e.Button <> MouseButtons.Left Then
