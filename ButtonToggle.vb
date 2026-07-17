@@ -171,7 +171,14 @@ Public Class ButtonToggleComp
     End Property
 
     Protected Overrides Sub RegisterInputParams(pManager As GH_Component.GH_InputParamManager)
-        pManager.AddGeometryParameter("Location", "P", "Point (text faces camera) or plane (text drawn in plane) per button/toggle (tree).", GH_ParamAccess.tree)
+        Dim p As New Grasshopper.Kernel.Parameters.Param_Geometry With {
+            .Name = "Location",
+            .NickName = "P",
+            .Description = "Optional point (text faces camera) or plane (text drawn in plane) per button/toggle (tree). Omit when clickable area (Ca) alone defines the controls.",
+            .Access = GH_ParamAccess.tree,
+            .Optional = True
+        }
+        pManager.AddParameter(p)
     End Sub
 
     Protected Overrides Sub RegisterOutputParams(pManager As GH_Component.GH_OutputParamManager)
@@ -376,7 +383,7 @@ Public Class ButtonToggleComp
                     .Optional = True,
                     .Name = "Clickable area",
                     .NickName = "Ca",
-                    .Description = "Optional surface/brep/mesh per point (tree paths match P) used as the clickable hit target instead of the point alone.",
+                    .Description = "Surface/brep/mesh hit target (tree). Paths match P when Location is wired; when P is empty, Ca alone defines the button/toggle slots.",
                     .Access = GH_ParamAccess.tree
                 }
             Case ZuiOptionalKind.Text
@@ -1160,17 +1167,47 @@ Public Class ButtonToggleComp
         Return False
     End Function
 
-    Private Shared Sub ForEachValidLocationSlot(locData As GH_Structure(Of IGH_GeometricGoo), apply As Action(Of Integer, GH_Path, Integer))
-        Dim flat As Integer = 0
-        For Each path As GH_Path In locData.Paths
-            Dim branch As IList(Of IGH_GeometricGoo) = locData.DataList(path)
-            For j As Integer = 0 To branch.Count - 1
-                Dim slot As ButtonToggleSlot
-                If TryParseLocationGoo(branch(j), slot) Then
-                    apply(flat, path, j)
-                    flat += 1
-                End If
-            Next
+    Private Shared Function TryGetAnchorFromGeometry(geom As GeometryBase, ByRef pt As Point3d) As Boolean
+        pt = Point3d.Unset
+        If geom Is Nothing Then Return False
+        Try
+            Dim bb As BoundingBox = geom.GetBoundingBox(True)
+            If Not bb.IsValid Then Return False
+            pt = bb.Center
+            Return pt.IsValid
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Private Shared Function IsClickableAreaGeometry(geom As GeometryBase) As Boolean
+        If geom Is Nothing Then Return False
+        If TypeOf geom Is Brep OrElse TypeOf geom Is Surface OrElse TypeOf geom Is Extrusion OrElse TypeOf geom Is Mesh Then Return True
+        Return False
+    End Function
+
+    Private Shared Function TryParseClickAreaGoo(g As IGH_GeometricGoo, ByRef slot As ButtonToggleSlot) As Boolean
+        slot = New ButtonToggleSlot
+        If g Is Nothing Then Return False
+        Dim gb As GeometryBase = GH_Convert.ToGeometryBase(g)
+        If gb Is Nothing OrElse Not IsClickableAreaGeometry(gb) Then Return False
+        Dim anchor As Point3d = Point3d.Unset
+        If Not TryGetAnchorFromGeometry(gb, anchor) Then Return False
+        slot.Location = anchor
+        slot.Plane = Plane.Unset
+        slot.HasPlane = False
+        slot.HasClickArea = True
+        slot.ClickArea = gb.Duplicate()
+        slot.Label = String.Empty
+        Return True
+    End Function
+
+    ''' <summary>Iterate built slots (from P and/or Ca) so optional inputs map by slot path/index.</summary>
+    Private Sub ForEachBuiltSlot(apply As Action(Of Integer, GH_Path, Integer))
+        For flat As Integer = 0 To Math.Max(0, Slots.Count) - 1
+            Dim path As GH_Path = If(flat < SlotPaths.Count, SlotPaths(flat), New GH_Path(0))
+            Dim j As Integer = If(flat < SlotBranchIndices.Count, SlotBranchIndices(flat), flat)
+            apply(flat, path, j)
         Next
     End Sub
 
@@ -1181,10 +1218,11 @@ Public Class ButtonToggleComp
         slots.Clear()
         paths.Clear()
         branchIndices.Clear()
+        If locData Is Nothing Then Return
         For Each path As GH_Path In locData.Paths
             Dim branch As IList(Of IGH_GeometricGoo) = locData.DataList(path)
             For j As Integer = 0 To branch.Count - 1
-                Dim slot As ButtonToggleSlot
+                Dim slot As ButtonToggleSlot = Nothing
                 If TryParseLocationGoo(branch(j), slot) Then
                     slot.HasClickArea = False
                     slot.ClickArea = Nothing
@@ -1197,7 +1235,34 @@ Public Class ButtonToggleComp
         Next
     End Sub
 
-    Private Sub MapBoolTreeToSlots(DA As IGH_DataAccess, nick As String, locData As GH_Structure(Of IGH_GeometricGoo),
+    ''' <summary>When Location is empty, create one slot per clickable-area geometry.</summary>
+    Private Function TryBuildSlotsFromClickArea(DA As IGH_DataAccess,
+                                                slots As List(Of ButtonToggleSlot),
+                                                paths As List(Of GH_Path),
+                                                branchIndices As List(Of Integer)) As Boolean
+        Dim ix As Integer = FindInputIndexByNick("Ca")
+        If ix < 0 OrElse Params.Input(ix).SourceCount = 0 Then Return False
+        Dim tree As New GH_Structure(Of IGH_GeometricGoo)
+        If Not DA.GetDataTree(ix, tree) OrElse tree.DataCount = 0 Then Return False
+
+        slots.Clear()
+        paths.Clear()
+        branchIndices.Clear()
+        For Each path As GH_Path In tree.Paths
+            Dim branch As IList(Of IGH_GeometricGoo) = tree.DataList(path)
+            For j As Integer = 0 To branch.Count - 1
+                Dim slot As ButtonToggleSlot = Nothing
+                If TryParseClickAreaGoo(branch(j), slot) Then
+                    slots.Add(slot)
+                    paths.Add(path)
+                    branchIndices.Add(j)
+                End If
+            Next
+        Next
+        Return slots.Count > 0
+    End Function
+
+    Private Sub MapBoolTreeToSlots(DA As IGH_DataAccess, nick As String,
                                    defaultValue As Boolean, apply As Action(Of Integer, Boolean))
         If SlotSettings Is Nothing Then Return
         Dim ix As Integer = FindInputIndexByNick(nick)
@@ -1213,7 +1278,7 @@ Public Class ButtonToggleComp
             If gb IsNot Nothing Then broadcast = gb.Value
         End If
 
-        ForEachValidLocationSlot(locData,
+        ForEachBuiltSlot(
             Sub(flat As Integer, path As GH_Path, j As Integer)
                 If flat >= SlotSettings.Length Then Return
                 Dim v As Boolean = defaultValue
@@ -1229,8 +1294,7 @@ Public Class ButtonToggleComp
             End Sub)
     End Sub
 
-    Private Sub MapIntTreeToSlots(DA As IGH_DataAccess, nick As String, locData As GH_Structure(Of IGH_GeometricGoo),
-                                  apply As Action(Of Integer, Integer))
+    Private Sub MapIntTreeToSlots(DA As IGH_DataAccess, nick As String, apply As Action(Of Integer, Integer))
         If SlotSettings Is Nothing Then Return
         Dim ix As Integer = FindInputIndexByNick(nick)
         If ix < 0 OrElse Params.Input(ix).SourceCount = 0 Then Return
@@ -1245,7 +1309,7 @@ Public Class ButtonToggleComp
             If gi IsNot Nothing Then broadcast = gi.Value
         End If
 
-        ForEachValidLocationSlot(locData,
+        ForEachBuiltSlot(
             Sub(flat As Integer, path As GH_Path, j As Integer)
                 If flat >= SlotSettings.Length Then Return
                 Dim v As Integer = ControlMode
@@ -1264,8 +1328,7 @@ Public Class ButtonToggleComp
             End Sub)
     End Sub
 
-    Private Sub MapNumberTreeToSlots(DA As IGH_DataAccess, nick As String, locData As GH_Structure(Of IGH_GeometricGoo),
-                                     apply As Action(Of Integer, Double))
+    Private Sub MapNumberTreeToSlots(DA As IGH_DataAccess, nick As String, apply As Action(Of Integer, Double))
         If SlotSettings Is Nothing Then Return
         Dim ix As Integer = FindInputIndexByNick(nick)
         If ix < 0 OrElse Params.Input(ix).SourceCount = 0 Then Return
@@ -1280,7 +1343,7 @@ Public Class ButtonToggleComp
             If gn IsNot Nothing AndAlso gn.IsValid Then broadcast = gn.Value
         End If
 
-        ForEachValidLocationSlot(locData,
+        ForEachBuiltSlot(
             Sub(flat As Integer, path As GH_Path, j As Integer)
                 If flat >= SlotSettings.Length Then Return
                 Dim v As Double = 0
@@ -1299,8 +1362,7 @@ Public Class ButtonToggleComp
             End Sub)
     End Sub
 
-    Private Sub MapStringTreeToSlots(DA As IGH_DataAccess, nick As String, locData As GH_Structure(Of IGH_GeometricGoo),
-                                     apply As Action(Of Integer, String))
+    Private Sub MapStringTreeToSlots(DA As IGH_DataAccess, nick As String, apply As Action(Of Integer, String))
         If SlotSettings Is Nothing Then Return
         Dim ix As Integer = FindInputIndexByNick(nick)
         If ix < 0 OrElse Params.Input(ix).SourceCount = 0 Then Return
@@ -1315,7 +1377,7 @@ Public Class ButtonToggleComp
             If gs IsNot Nothing Then broadcast = If(gs.Value, String.Empty)
         End If
 
-        ForEachValidLocationSlot(locData,
+        ForEachBuiltSlot(
             Sub(flat As Integer, path As GH_Path, j As Integer)
                 If flat >= SlotSettings.Length Then Return
                 Dim v As String = String.Empty
@@ -1334,8 +1396,7 @@ Public Class ButtonToggleComp
             End Sub)
     End Sub
 
-    Private Sub MapColourTreeToSlots(DA As IGH_DataAccess, nick As String, locData As GH_Structure(Of IGH_GeometricGoo),
-                                     apply As Action(Of Integer, Color))
+    Private Sub MapColourTreeToSlots(DA As IGH_DataAccess, nick As String, apply As Action(Of Integer, Color))
         If SlotSettings Is Nothing Then Return
         Dim ix As Integer = FindInputIndexByNick(nick)
         If ix < 0 OrElse Params.Input(ix).SourceCount = 0 Then Return
@@ -1350,7 +1411,7 @@ Public Class ButtonToggleComp
             If gc IsNot Nothing Then broadcast = gc.Value
         End If
 
-        ForEachValidLocationSlot(locData,
+        ForEachBuiltSlot(
             Sub(flat As Integer, path As GH_Path, j As Integer)
                 If flat >= SlotSettings.Length Then Return
                 Dim col As Color = TagColour
@@ -1369,7 +1430,7 @@ Public Class ButtonToggleComp
             End Sub)
     End Sub
 
-    Private Sub MapGeometryTreeToSlots(DA As IGH_DataAccess, locData As GH_Structure(Of IGH_GeometricGoo))
+    Private Sub MapGeometryTreeToSlots(DA As IGH_DataAccess)
         If SlotSettings Is Nothing Then Return
         Dim ix As Integer = FindInputIndexByNick("Ca")
         If ix < 0 OrElse Params.Input(ix).SourceCount = 0 Then Return
@@ -1383,7 +1444,7 @@ Public Class ButtonToggleComp
             broadcast = tree.AllData(True).FirstOrDefault()
         End If
 
-        ForEachValidLocationSlot(locData,
+        ForEachBuiltSlot(
             Sub(flat As Integer, path As GH_Path, j As Integer)
                 If flat >= SlotSettings.Length Then Return
                 Dim gg As IGH_GeometricGoo = Nothing
@@ -1395,13 +1456,13 @@ Public Class ButtonToggleComp
                 End If
                 If gg Is Nothing Then Return
                 Dim gb As GeometryBase = GH_Convert.ToGeometryBase(gg)
-                If gb Is Nothing Then Return
+                If gb Is Nothing OrElse Not IsClickableAreaGeometry(gb) Then Return
                 SlotSettings(flat).ClickArea = gb.Duplicate()
                 SlotSettings(flat).HasClickArea = True
             End Sub)
     End Sub
 
-    Private Sub BuildSlotSettings(DA As IGH_DataAccess, locData As GH_Structure(Of IGH_GeometricGoo))
+    Private Sub BuildSlotSettings(DA As IGH_DataAccess)
         Dim n As Integer = Math.Max(0, Slots.Count)
         If n <= 0 Then
             SlotSettings = Nothing
@@ -1425,25 +1486,31 @@ Public Class ButtonToggleComp
             s.HasFillHover = False
             s.HasFillClicked = False
             s.Label = String.Empty
-            s.ClickArea = Nothing
-            s.HasClickArea = False
+            ' Preserve Ca-only click areas already stored on slots until MapGeometry runs.
+            If Slots(i).HasClickArea AndAlso Slots(i).ClickArea IsNot Nothing Then
+                s.ClickArea = Slots(i).ClickArea
+                s.HasClickArea = True
+            Else
+                s.ClickArea = Nothing
+                s.HasClickArea = False
+            End If
             SlotSettings(i) = s
         Next
 
         If HasZuiInput(ZuiOptionalKind.Active) Then
-            MapBoolTreeToSlots(DA, "Ac", locData, True, Sub(i, v) SlotSettings(i).Active = v)
+            MapBoolTreeToSlots(DA, "Ac", True, Sub(i, v) SlotSettings(i).Active = v)
         End If
         If HasZuiInput(ZuiOptionalKind.Mode) Then
-            MapIntTreeToSlots(DA, "Md", locData, Sub(i, v) SlotSettings(i).Mode = ClampMode(v))
+            MapIntTreeToSlots(DA, "Md", Sub(i, v) SlotSettings(i).Mode = ClampMode(v))
         End If
         If HasZuiInput(ZuiOptionalKind.Size) Then
-            MapNumberTreeToSlots(DA, "S", locData,
+            MapNumberTreeToSlots(DA, "S",
                 Sub(i, v)
                     If v > 0 AndAlso Not Double.IsNaN(v) Then SlotSettings(i).TextHeight = v
                 End Sub)
         End If
         If HasZuiInput(ZuiOptionalKind.TextDefault) Then
-            MapColourTreeToSlots(DA, "Td", locData,
+            MapColourTreeToSlots(DA, "Td",
                 Sub(i, col)
                     SlotSettings(i).TextDefault = col
                     SlotSettings(i).HasTextDefault = True
@@ -1451,79 +1518,79 @@ Public Class ButtonToggleComp
         End If
         ' Legacy nick "C" from earlier builds maps to text default.
         If Not HasZuiInput(ZuiOptionalKind.TextDefault) AndAlso FindInputIndexByNick("C") >= 0 Then
-            MapColourTreeToSlots(DA, "C", locData,
+            MapColourTreeToSlots(DA, "C",
                 Sub(i, col)
                     SlotSettings(i).TextDefault = col
                     SlotSettings(i).HasTextDefault = True
                 End Sub)
         End If
         If HasZuiInput(ZuiOptionalKind.TextHover) Then
-            MapColourTreeToSlots(DA, "Th", locData,
+            MapColourTreeToSlots(DA, "Th",
                 Sub(i, col)
                     SlotSettings(i).TextHover = col
                     SlotSettings(i).HasTextHover = True
                 End Sub)
         End If
         If HasZuiInput(ZuiOptionalKind.TextClicked) Then
-            MapColourTreeToSlots(DA, "Tc", locData,
+            MapColourTreeToSlots(DA, "Tc",
                 Sub(i, col)
                     SlotSettings(i).TextClicked = col
                     SlotSettings(i).HasTextClicked = True
                 End Sub)
         End If
         If HasZuiInput(ZuiOptionalKind.EdgeDefault) Then
-            MapColourTreeToSlots(DA, "Ed", locData,
+            MapColourTreeToSlots(DA, "Ed",
                 Sub(i, col)
                     SlotSettings(i).EdgeDefault = col
                     SlotSettings(i).HasEdgeDefault = True
                 End Sub)
         End If
         If HasZuiInput(ZuiOptionalKind.EdgeHover) Then
-            MapColourTreeToSlots(DA, "Eh", locData,
+            MapColourTreeToSlots(DA, "Eh",
                 Sub(i, col)
                     SlotSettings(i).EdgeHover = col
                     SlotSettings(i).HasEdgeHover = True
                 End Sub)
         End If
         If HasZuiInput(ZuiOptionalKind.EdgeClicked) Then
-            MapColourTreeToSlots(DA, "Ec", locData,
+            MapColourTreeToSlots(DA, "Ec",
                 Sub(i, col)
                     SlotSettings(i).EdgeClicked = col
                     SlotSettings(i).HasEdgeClicked = True
                 End Sub)
         End If
         If HasZuiInput(ZuiOptionalKind.FillDefault) Then
-            MapColourTreeToSlots(DA, "Fd", locData,
+            MapColourTreeToSlots(DA, "Fd",
                 Sub(i, col)
                     SlotSettings(i).FillDefault = col
                     SlotSettings(i).HasFillDefault = True
                 End Sub)
         End If
         If HasZuiInput(ZuiOptionalKind.FillHover) Then
-            MapColourTreeToSlots(DA, "Fh", locData,
+            MapColourTreeToSlots(DA, "Fh",
                 Sub(i, col)
                     SlotSettings(i).FillHover = col
                     SlotSettings(i).HasFillHover = True
                 End Sub)
         End If
         If HasZuiInput(ZuiOptionalKind.FillClicked) Then
-            MapColourTreeToSlots(DA, "Fc", locData,
+            MapColourTreeToSlots(DA, "Fc",
                 Sub(i, col)
                     SlotSettings(i).FillClicked = col
                     SlotSettings(i).HasFillClicked = True
                 End Sub)
         End If
         If HasZuiInput(ZuiOptionalKind.Font) Then
-            MapStringTreeToSlots(DA, "Fn", locData,
+            MapStringTreeToSlots(DA, "Fn",
                 Sub(i, v)
                     If Not String.IsNullOrWhiteSpace(v) Then SlotSettings(i).FontFace = v.Trim()
                 End Sub)
         End If
         If HasZuiInput(ZuiOptionalKind.Text) Then
-            MapStringTreeToSlots(DA, "Tx", locData, Sub(i, v) SlotSettings(i).Label = If(v, String.Empty))
+            MapStringTreeToSlots(DA, "Tx", Sub(i, v) SlotSettings(i).Label = If(v, String.Empty))
         End If
         If HasZuiInput(ZuiOptionalKind.ClickableArea) Then
-            MapGeometryTreeToSlots(DA, locData)
+            MapGeometryTreeToSlots(DA)
         End If
 
         ' Push label / area onto slots for hit-testing & draw.
@@ -1549,11 +1616,7 @@ Public Class ButtonToggleComp
 
     Protected Overrides Sub SolveInstance(DA As IGH_DataAccess)
         Dim locData As New GH_Structure(Of IGH_GeometricGoo)
-        If Not DA.GetDataTree(0, locData) Then
-            SoftClearSlots()
-            SyncMouse()
-            Exit Sub
-        End If
+        DA.GetDataTree(0, locData)
 
         ApplyZuiBooleanInputs(DA)
 
@@ -1561,6 +1624,16 @@ Public Class ButtonToggleComp
         Dim newPaths As New List(Of GH_Path)
         Dim newBranchIndices As New List(Of Integer)
         BuildSlotsFromTree(locData, newSlots, newPaths, newBranchIndices)
+        If newSlots.Count = 0 Then
+            TryBuildSlotsFromClickArea(DA, newSlots, newPaths, newBranchIndices)
+        End If
+
+        If newSlots.Count = 0 Then
+            SoftClearSlots()
+            DA.SetDataTree(0, New GH_Structure(Of GH_Boolean))
+            SyncMouse()
+            Exit Sub
+        End If
 
         If CacheSlots Is Nothing OrElse CacheTreeKeys Is Nothing Then
             StoreLocationCache(newSlots, newPaths, newBranchIndices)
@@ -1595,7 +1668,7 @@ Public Class ButtonToggleComp
         Slots = newSlots
         SlotPaths = newPaths
         SlotBranchIndices = newBranchIndices
-        BuildSlotSettings(DA, locData)
+        BuildSlotSettings(DA)
 
         While States.Count < Slots.Count
             States.Add(False)
@@ -1920,7 +1993,7 @@ Public Class ButtonToggleComp
 
         For i As Integer = 0 To Slots.Count - 1
             Dim s As ButtonToggleSlot = Slots(i)
-            If Not s.Location.IsValid Then Continue For
+            If Not s.Location.IsValid AndAlso Not (s.HasClickArea AndAlso s.ClickArea IsNot Nothing) Then Continue For
             Dim isOn As Boolean = EffectiveState(i)
             Dim isHover As Boolean = (i = HoverIndex)
             Dim col As Color = TextColourForIndex(i, isHover, isOn)
@@ -1932,7 +2005,7 @@ Public Class ButtonToggleComp
             End If
 
             Dim txt As String = LabelForIndex(i)
-            If Not String.IsNullOrEmpty(txt) Then
+            If Not String.IsNullOrEmpty(txt) AndAlso s.Location.IsValid Then
                 Dim pl As Plane = PlaneForSlotViewport(i, vp)
                 Dim height As Double = TextHeightForIndex(i) * If(isHover, HoverTextScale, 1.0R)
                 Dim fontFace As String = FontFaceForIndex(i)
@@ -1942,7 +2015,7 @@ Public Class ButtonToggleComp
                     t3.VerticalAlignment = Rhino.DocObjects.TextVerticalAlignment.Middle
                     args.Display.Draw3dText(t3, col)
                 End Using
-            Else
+            ElseIf Not s.HasClickArea AndAlso s.Location.IsValid Then
                 Dim style As PointStyle = If(isOn, PointStyle.RoundSimple, PointStyle.RoundControlPoint)
                 Dim size As Single = If(isHover, 8.0F, 6.0F)
                 If isOn Then size += 1.5F
@@ -2264,6 +2337,25 @@ Public Class ButtonToggleMouse
         PollHoverFromGlobalCursor()
     End Sub
 
+    ''' <summary>
+    ''' After Cancelled viewport clicks, Rhino often ignores the next MouseDown at the same pixel until the cursor moves.
+    ''' Flipping Enabled re-arms MouseCallback so rapid clicks on the same clickable area keep working.
+    ''' </summary>
+    Private Sub RearmMouseCallback()
+        Try
+            Dim was As Boolean = Me.Enabled
+            Me.Enabled = False
+            Me.Enabled = was
+        Catch
+        End Try
+    End Sub
+
+    Private Sub FinishClickInteraction(Optional cancelEvent As Rhino.UI.MouseCallbackEventArgs = Nothing)
+        ResumeHoverPoll()
+        RearmMouseCallback()
+        If cancelEvent IsNot Nothing Then cancelEvent.Cancel = True
+    End Sub
+
     Private Sub ReleaseHeldButton()
         If _buttonHeld < 0 OrElse Comp Is Nothing Then
             _buttonHeld = -1
@@ -2280,6 +2372,9 @@ Public Class ButtonToggleMouse
         If Comp Is Nothing Then Exit Sub
         If e.Button <> MouseButtons.Left Then Exit Sub
         If e.View Is Nothing Then Exit Sub
+
+        ' Clear a stuck momentary press if a prior MouseUp was dropped.
+        If _buttonHeld >= 0 Then ReleaseHeldButton()
 
         Dim vp As RhinoViewport = e.View.ActiveViewport
         If vp Is Nothing Then Exit Sub
@@ -2311,10 +2406,11 @@ Public Class ButtonToggleMouse
         If (dx * dx + dy * dy) > (ClickSlopPx * ClickSlopPx) Then
             If _buttonHeld >= 0 Then ReleaseHeldButton()
             _pendingHit = -1
-            ResumeHoverPoll()
+            FinishClickInteraction()
             Exit Sub
         End If
-        e.Cancel = True
+        ' Do not Cancel mouse-move: cancelling moves after a Cancelled mouse-down leaves Rhino
+        ' unable to deliver another click until the cursor actually moves.
     End Sub
 
     Protected Overrides Sub OnMouseUp(e As Rhino.UI.MouseCallbackEventArgs)
@@ -2324,25 +2420,32 @@ Public Class ButtonToggleMouse
 
         If _buttonHeld >= 0 Then
             ReleaseHeldButton()
-            ResumeHoverPoll()
-            e.Cancel = True
+            FinishClickInteraction(e)
             Exit Sub
         End If
 
         If hit < 0 Then
-            ResumeHoverPoll()
+            FinishClickInteraction()
             Exit Sub
         End If
-        If Comp Is Nothing Then Exit Sub
-        If e.Button <> MouseButtons.Left Then Exit Sub
-        If hit >= Comp.Slots.Count Then Exit Sub
+        If Comp Is Nothing Then
+            FinishClickInteraction()
+            Exit Sub
+        End If
+        If e.Button <> MouseButtons.Left Then
+            FinishClickInteraction()
+            Exit Sub
+        End If
+        If hit >= Comp.Slots.Count Then
+            FinishClickInteraction()
+            Exit Sub
+        End If
 
         If Comp.ModeForIndex(hit) = ButtonToggleComp.ModeToggle Then
             Comp.ToggleSlot(hit)
         End If
 
-        ResumeHoverPoll()
-        e.Cancel = True
+        FinishClickInteraction(e)
     End Sub
 
 End Class
